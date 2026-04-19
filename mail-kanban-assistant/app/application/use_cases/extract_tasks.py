@@ -67,7 +67,7 @@ class ExtractTasksUseCase:
                     dedupe_keys.append(f"{msg.id}:{item.title.strip().lower()}")
 
                 saved = self.tasks.save_candidate_tasks(msg.id, domain_tasks, dedupe_keys)
-                tasks_created += sum(1 for _ in saved)
+                tasks_created += sum(1 for s in saved if s.created)
 
                 for dt in domain_tasks:
                     maybe_sync_to_kanban(kanban=self.kanban, task=dt, message=msg, policy=policy)

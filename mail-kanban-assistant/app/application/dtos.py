@@ -165,6 +165,7 @@ class SavedCandidateTaskDTO(BaseModel):
 
     task_id: int
     dedupe_key: str
+    created: bool
 
 
 @dataclass(frozen=True, slots=True)

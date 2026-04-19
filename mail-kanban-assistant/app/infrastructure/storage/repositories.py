@@ -266,9 +266,9 @@ class SqliteTaskRepository:
                     (key,),
                 ).fetchone()
                 if existing is not None:
-                    saved.append(SavedCandidateTaskDTO(task_id=int(existing["id"]), dedupe_key=key))
+                    saved.append(SavedCandidateTaskDTO(task_id=int(existing["id"]), dedupe_key=key, created=False))
                 continue
-            saved.append(SavedCandidateTaskDTO(task_id=int(row["id"]), dedupe_key=key))
+            saved.append(SavedCandidateTaskDTO(task_id=int(row["id"]), dedupe_key=key, created=True))
         self._conn.commit()
         return tuple(saved)
 
