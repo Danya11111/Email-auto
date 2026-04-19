@@ -100,3 +100,24 @@ WHERE status = 'pending' AND review_kind = 'triage' AND related_task_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_pending_task
 ON review_items(related_task_id)
 WHERE status = 'pending' AND review_kind = 'task' AND related_task_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS ingested_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_hash TEXT NOT NULL UNIQUE,
+  snapshot_id TEXT,
+  source_type TEXT NOT NULL,
+  original_filename TEXT NOT NULL,
+  related_message_id INTEGER,
+  status TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  processed_at TEXT,
+  error_text TEXT,
+  FOREIGN KEY(related_message_id) REFERENCES messages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingested_artifacts_status ON ingested_artifacts(status);
+CREATE INDEX IF NOT EXISTS idx_ingested_artifacts_snapshot_id ON ingested_artifacts(snapshot_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ingested_artifacts_snapshot_id
+ON ingested_artifacts(snapshot_id)
+WHERE snapshot_id IS NOT NULL;

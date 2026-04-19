@@ -13,6 +13,7 @@ from app.application.use_cases import (
     IngestMessagesUseCase,
     TriageMessagesUseCase,
 )
+from app.application.use_cases.process_apple_mail_drop import ProcessAppleMailDropUseCase
 from app.application.use_cases.approve_review_item import ApproveReviewItemUseCase
 from app.application.use_cases.enqueue_review_items import EnqueueReviewItemsUseCase
 from app.application.use_cases.list_pending_reviews import ListPendingReviewsUseCase
@@ -24,6 +25,8 @@ from app.infrastructure.llm.client import LmStudioStructuredClient
 from app.infrastructure.logging.logger import StructuredLoggerAdapter
 from app.infrastructure.mail.eml_reader import EmlDirectoryReader
 from app.infrastructure.mail.mbox_reader import MboxFileReader
+from app.infrastructure.fs.maildrop_filesystem import OsMaildropFilesystem
+from app.infrastructure.mail.apple_mail_drop_reader import AppleMailDropIncomingScanner
 from app.infrastructure.storage.repositories import (
     SqliteDigestContextRepository,
     SqliteMessageRepository,
@@ -33,6 +36,7 @@ from app.infrastructure.storage.repositories import (
     SqliteTaskRepository,
     SqliteTriageRepository,
 )
+from app.infrastructure.storage.sqlite_ingested_artifact_repository import SqliteIngestedArtifactRepository
 from app.infrastructure.storage.sqlite_db import initialize_database, open_connection
 from app.utils.ids import new_run_id
 
@@ -83,6 +87,24 @@ class AppWiring(NamedTuple):
     list_reviews_uc: ListPendingReviewsUseCase
     approve_review_uc: ApproveReviewItemUseCase
     reject_review_uc: RejectReviewItemUseCase
+
+
+def build_process_apple_mail_drop_use_case(
+    conn,
+    clock: SystemClock,
+    logger: StructuredLoggerAdapter,
+) -> ProcessAppleMailDropUseCase:
+    messages = SqliteMessageRepository(conn, clock)
+    artifacts = SqliteIngestedArtifactRepository(conn, clock)
+    fs = OsMaildropFilesystem(logger)
+    scanner = AppleMailDropIncomingScanner()
+    return ProcessAppleMailDropUseCase(
+        messages=messages,
+        artifacts=artifacts,
+        fs=fs,
+        scanner=scanner,
+        logger=logger,
+    )
 
 
 def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, settings: AppSettings) -> AppWiring:
@@ -165,6 +187,8 @@ def format_run_daily_stdout_summary(
     pipeline_db_id: int,
     inserted_total: int,
     duplicates_total: int,
+    apple_mail_drop_ingested: int = 0,
+    apple_mail_drop_duplicates: int = 0,
     triage: object,
     extract: object,
     digest_id: int,
@@ -174,6 +198,8 @@ def format_run_daily_stdout_summary(
         f"pipeline_run_db_id={pipeline_db_id}",
         f"ingest.inserted_total={inserted_total}",
         f"ingest.duplicates_total={duplicates_total}",
+        f"ingest.apple_mail_drop.ingested={apple_mail_drop_ingested}",
+        f"ingest.apple_mail_drop.duplicates={apple_mail_drop_duplicates}",
         f"triage.processed={getattr(triage, 'processed')}",
         f"triage.failures={getattr(triage, 'failures')}",
         f"triage.reviews_enqueued={getattr(triage, 'reviews_enqueued')}",
@@ -203,9 +229,12 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
     )
 
     ingest_uc = IngestMessagesUseCase(messages=w.messages, pipeline_runs=w.pipeline, logger=logger)
+    drop_uc = build_process_apple_mail_drop_use_case(conn, clock, logger)
 
     inserted_total = 0
     duplicates_total = 0
+    apple_mail_drop_ingested = 0
+    apple_mail_drop_duplicates = 0
     try:
         if settings.mail_eml_dir is not None:
             res = ingest_uc.execute(
@@ -227,6 +256,12 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
             inserted_total += res.inserted
             duplicates_total += res.duplicates
 
+        drop_res = drop_uc.execute(maildrop_root=settings.maildrop_root, run_id=run_id)
+        inserted_total += drop_res.ingested
+        duplicates_total += drop_res.duplicate
+        apple_mail_drop_ingested = drop_res.ingested
+        apple_mail_drop_duplicates = drop_res.duplicate
+
         triage_res = w.triage_uc.execute(run_id=run_id, batch_limit=int(settings.triage_batch_size))
         extract_res = w.extract_uc.execute(
             run_id=run_id,
@@ -237,6 +272,8 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
         pipeline_stats: dict[str, object] = {
             "ingest.inserted_total": inserted_total,
             "ingest.duplicates_total": duplicates_total,
+            "ingest.apple_mail_drop.ingested": apple_mail_drop_ingested,
+            "ingest.apple_mail_drop.duplicates": apple_mail_drop_duplicates,
             "triage.processed": triage_res.processed,
             "triage.failures": triage_res.failures,
             "triage.reviews_enqueued": triage_res.reviews_enqueued,
@@ -274,6 +311,8 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
             pipeline_db_id=pipeline_db_id,
             inserted_total=inserted_total,
             duplicates_total=duplicates_total,
+            apple_mail_drop_ingested=apple_mail_drop_ingested,
+            apple_mail_drop_duplicates=apple_mail_drop_duplicates,
             triage=triage_res,
             extract=extract_res,
             digest_id=digest_res.digest_id,

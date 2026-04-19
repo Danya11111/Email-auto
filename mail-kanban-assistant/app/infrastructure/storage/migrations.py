@@ -51,4 +51,31 @@ def upgrade_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ingested_artifacts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_hash TEXT NOT NULL UNIQUE,
+          snapshot_id TEXT,
+          source_type TEXT NOT NULL,
+          original_filename TEXT NOT NULL,
+          related_message_id INTEGER,
+          status TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          processed_at TEXT,
+          error_text TEXT,
+          FOREIGN KEY(related_message_id) REFERENCES messages(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ingested_artifacts_status ON ingested_artifacts(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ingested_artifacts_snapshot_id ON ingested_artifacts(snapshot_id)")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ingested_artifacts_snapshot_id
+        ON ingested_artifacts(snapshot_id)
+        WHERE snapshot_id IS NOT NULL
+        """
+    )
+
     conn.commit()

@@ -13,7 +13,18 @@ class MessageImportance(StrEnum):
 class MessageSource(StrEnum):
     EML = "eml"
     MBOX = "mbox"
+    # Legacy placeholder for export-based readers (stub adapter).
     APPLE_MAIL = "apple_mail"
+    # JSON snapshots from Apple Mail automation (local-first drop folder).
+    APPLE_MAIL_DROP = "apple_mail_drop"
+
+
+class IngestedArtifactStatus(StrEnum):
+    """Lifecycle for maildrop files / snapshot artifacts (restart-safe bookkeeping)."""
+
+    PENDING = "pending"
+    PROCESSED = "processed"
+    FAILED = "failed"
 
 
 class TaskStatus(StrEnum):

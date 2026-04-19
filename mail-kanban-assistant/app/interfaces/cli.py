@@ -2,15 +2,27 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
+from typing import Optional
 
 import typer
 
+from app.application.doctor_report import DoctorEnvironmentUseCase
+from app.application.launchd_plist import LaunchdPlistSpecDTO, render_launchd_plist_xml
 from app.application.policies import TaskAutomationPolicy
 from app.application.use_cases import IngestMessagesUseCase
-from app.bootstrap import build_wiring, init_database, run_daily
+from app.application.use_cases.prepare_maildrop import PrepareMaildropUseCase
+from app.bootstrap import (
+    build_process_apple_mail_drop_use_case,
+    build_wiring,
+    init_database,
+    run_daily,
+)
 from app.config import AppSettings
 from app.infrastructure.clock import SystemClock
+from app.infrastructure.fs.maildrop_filesystem import OsMaildropFilesystem
+from app.infrastructure.http.http_probe import UrllibHttpProbe
 from app.infrastructure.logging.logger import StructuredLoggerAdapter
 from app.infrastructure.mail.eml_reader import EmlDirectoryReader
 from app.infrastructure.mail.mbox_reader import MboxFileReader
@@ -222,6 +234,145 @@ def review_export(
     finally:
         w.llm.close()
         conn.close()
+
+
+@app.command("prepare-maildrop")
+def prepare_maildrop_cmd(
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        help="Maildrop root directory (creates incoming/processed/failed/exported). Defaults to MAILDROP_ROOT.",
+    ),
+) -> None:
+    settings = AppSettings()
+    root = path.resolve() if path is not None else settings.maildrop_root.resolve()
+    logger = StructuredLoggerAdapter()
+    uc = PrepareMaildropUseCase(fs=OsMaildropFilesystem(logger))
+    typer.echo(uc.execute(root))
+
+
+@app.command("ingest-apple-mail-drop")
+def ingest_apple_mail_drop_cmd(
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        help="Maildrop root (reads incoming/*.json). Defaults to MAILDROP_ROOT from settings.",
+    ),
+) -> None:
+    settings = AppSettings()
+    root = path.resolve() if path is not None else settings.maildrop_root.resolve()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    uc = build_process_apple_mail_drop_use_case(conn, clock, logger)
+    run_id = new_run_id()
+    try:
+        res = uc.execute(maildrop_root=root, run_id=run_id)
+        typer.echo(
+            "ingest-apple-mail-drop done: "
+            f"found={res.found} ingested={res.ingested} duplicate={res.duplicate} failed={res.failed} "
+            f"moved_processed={res.moved_processed} moved_failed={res.moved_failed} run_id={res.run_id}"
+        )
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("doctor")
+def doctor_cmd(
+    repo_root: Optional[Path] = typer.Option(
+        None,
+        "--repo-root",
+        help="Repository root for relative checks (defaults to current working directory).",
+    ),
+    wrapper: Optional[Path] = typer.Option(
+        None,
+        "--wrapper",
+        help="Optional path to launchd wrapper script (defaults to <repo>/scripts/macos/run-mail-assistant-daily.sh).",
+    ),
+) -> None:
+    settings = AppSettings()
+    rr = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
+    wr = wrapper.resolve() if wrapper is not None else (rr / "scripts" / "macos" / "run-mail-assistant-daily.sh")
+    uc = DoctorEnvironmentUseCase(http=UrllibHttpProbe())
+    report = uc.execute(settings, repo_root=rr, wrapper_script=wr)
+    typer.echo(report.render_text())
+
+
+def _default_launchd_log_paths(repo_root: Path) -> tuple[Path, Path]:
+    if sys.platform == "darwin":
+        base = Path.home() / "Library/Logs/mail-assistant"
+        return base / "stdout.log", base / "stderr.log"
+    return repo_root / "data" / "logs" / "launchd-stdout.log", repo_root / "data" / "logs" / "launchd-stderr.log"
+
+
+@app.command("print-launchd")
+def print_launchd_cmd(
+    repo_root: Optional[Path] = typer.Option(None, "--repo-root", help="Checkout root (absolute paths in plist)."),
+    wrapper: Optional[Path] = typer.Option(None, "--wrapper", help="Wrapper script path."),
+    digest_out: Optional[Path] = typer.Option(None, "--digest-out", help="Digest output path for run-daily."),
+    hour: int = typer.Option(7, "--hour", min=0, max=23),
+    minute: int = typer.Option(0, "--minute", min=0, max=59),
+) -> None:
+    settings = AppSettings()
+    rr = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
+    wr = wrapper.resolve() if wrapper is not None else (rr / "scripts" / "macos" / "run-mail-assistant-daily.sh")
+    digest = digest_out.resolve() if digest_out is not None else (rr / "data" / "digest.md")
+    out_log, err_log = _default_launchd_log_paths(rr)
+    spec = LaunchdPlistSpecDTO(
+        label=settings.launchd_label,
+        wrapper_script=wr,
+        working_directory=rr,
+        digest_out=digest,
+        stdout_path=out_log,
+        stderr_path=err_log,
+        hour=hour,
+        minute=minute,
+        maildrop_root=settings.maildrop_root.resolve(),
+    )
+    typer.echo(render_launchd_plist_xml(spec))
+
+
+@app.command("install-launchd")
+def install_launchd_cmd(
+    output: Path = typer.Option(..., "--output", help="Where to write the LaunchAgent plist."),
+    repo_root: Optional[Path] = typer.Option(None, "--repo-root", help="Checkout root (absolute paths in plist)."),
+    wrapper: Optional[Path] = typer.Option(None, "--wrapper", help="Wrapper script path."),
+    digest_out: Optional[Path] = typer.Option(None, "--digest-out", help="Digest output path for run-daily."),
+    hour: int = typer.Option(7, "--hour", min=0, max=23),
+    minute: int = typer.Option(0, "--minute", min=0, max=59),
+) -> None:
+    settings = AppSettings()
+    rr = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
+    wr = wrapper.resolve() if wrapper is not None else (rr / "scripts" / "macos" / "run-mail-assistant-daily.sh")
+    digest = digest_out.resolve() if digest_out is not None else (rr / "data" / "digest.md")
+    out_log, err_log = _default_launchd_log_paths(rr)
+    spec = LaunchdPlistSpecDTO(
+        label=settings.launchd_label,
+        wrapper_script=wr,
+        working_directory=rr,
+        digest_out=digest,
+        stdout_path=out_log,
+        stderr_path=err_log,
+        hour=hour,
+        minute=minute,
+        maildrop_root=settings.maildrop_root.resolve(),
+    )
+    xml = render_launchd_plist_xml(spec)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(xml, encoding="utf-8")
+    typer.echo(f"Wrote plist to {output.resolve()}")
+    if sys.platform == "darwin":
+        typer.echo("Next (user LaunchAgent):")
+        typer.echo("  mkdir -p ~/Library/LaunchAgents")
+        typer.echo(f"  cp {output.resolve()} ~/Library/LaunchAgents/{settings.launchd_label}.plist")
+        typer.echo(
+            f"  launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/{settings.launchd_label}.plist 2>/dev/null || true"
+        )
+        typer.echo(f"  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{settings.launchd_label}.plist")
+    else:
+        typer.echo("Note: launchctl steps above apply to macOS only.")
 
 
 @app.command("run-daily")

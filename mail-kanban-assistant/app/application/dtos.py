@@ -6,6 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.domain.enums import (
+    IngestedArtifactStatus,
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
@@ -223,3 +224,31 @@ class RunDailyResultDTO:
     digest_markdown: str
     stdout_summary: str
     digest_id: int
+
+
+class IngestedArtifactRecordDTO(BaseModel):
+    """SQLite row view for maildrop / snapshot artifact bookkeeping."""
+
+    model_config = {"frozen": True}
+
+    id: int
+    content_hash: str
+    snapshot_id: str | None
+    source_type: str
+    original_filename: str
+    related_message_id: int | None
+    status: IngestedArtifactStatus
+    first_seen_at: datetime
+    processed_at: datetime | None
+    error_text: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AppleMailDropIngestSummaryDTO:
+    run_id: str
+    found: int
+    ingested: int
+    duplicate: int
+    failed: int
+    moved_processed: int
+    moved_failed: int

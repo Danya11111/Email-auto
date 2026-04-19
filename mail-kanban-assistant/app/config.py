@@ -42,6 +42,14 @@ class AppSettings(BaseSettings):
     mail_eml_dir: Path | None = Field(default=None, validation_alias="MAIL_EML_DIR")
     mail_mbox_path: Path | None = Field(default=None, validation_alias="MAIL_MBOX_PATH")
 
+    maildrop_root: Path = Field(
+        default=Path("./data/maildrop"),
+        validation_alias="MAILDROP_ROOT",
+        description="Root for Apple Mail JSON snapshot drop workflow (incoming/processed/failed).",
+    )
+
+    launchd_label: str = Field(default="com.local.mailassistant", validation_alias="LAUNCHD_LABEL")
+
     @field_validator("mail_eml_dir", "mail_mbox_path", mode="before")
     @classmethod
     def _empty_paths_to_none(cls, value: object) -> object:
@@ -49,6 +57,13 @@ class AppSettings(BaseSettings):
             return None
         if isinstance(value, str) and value.strip() == "":
             return None
+        return value
+
+    @field_validator("maildrop_root", mode="before")
+    @classmethod
+    def _strip_maildrop_root(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip() == "":
+            return Path("./data/maildrop")
         return value
 
     @field_validator("message_body_truncate_strategy", mode="before")

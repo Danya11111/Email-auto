@@ -19,6 +19,7 @@ from app.application.dtos import (
 )
 from app.application.ports import ClockPort
 from app.domain.enums import (
+    IngestedArtifactStatus,
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
@@ -93,6 +94,13 @@ class SqliteMessageRepository:
             if "dedupe_key" in str(exc).lower() or "unique" in str(exc).lower():
                 raise DuplicateMessageError("duplicate dedupe_key") from exc
             raise
+
+    def find_message_id_by_dedupe_key(self, dedupe_key: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT id FROM messages WHERE dedupe_key = ? LIMIT 1",
+            (dedupe_key,),
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
 
     def list_messages_pending_triage(self, limit: int) -> Sequence[PersistedMessageDTO]:
         rows = self._conn.execute(

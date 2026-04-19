@@ -1,6 +1,6 @@
 # Mail Kanban Assistant (MVP scaffold)
 
-Local-first macOS-oriented assistant that ingests exported mail (`.eml` / `.mbox`), triages it with a **local LLM** served by **LM Studio** (OpenAI-compatible API), extracts candidate tasks, routes uncertain outputs through a **CLI review queue**, and generates a **deterministic daily digest** markdown artifact.
+Local-first macOS-oriented assistant that ingests exported mail (`.eml` / `.mbox`) **and** an **Apple Mail JSON snapshot maildrop** (`MAILDROP_ROOT/incoming`), triages it with a **local LLM** served by **LM Studio** (OpenAI-compatible API), extracts candidate tasks, routes uncertain outputs through a **CLI review queue**, and generates a **deterministic daily digest** markdown artifact.
 
 This repository is intentionally **not** a toy script: it is a **Clean Architecture** scaffold with explicit ports, SQLite persistence, structured LLM outputs for triage/tasks, idempotent ingestion, and pytest coverage using fake LLM ports.
 
@@ -38,13 +38,14 @@ interfaces (CLI) ──► application (use cases + ports + policies) ──► 
   - small batch sizes (`TRIAGE_BATCH_SIZE`, `TASK_EXTRACTION_BATCH_SIZE`) to avoid huge per-run spikes.
 - **LM Studio**: OpenAI-compatible `POST /v1/chat/completions` with JSON validation via **Pydantic** (primary attempt uses `response_format=json_schema`; falls back to `json_object` + schema text for compatibility).
 - **Persistence**: SQLite via `sqlite3` stdlib + repositories.
-- **Mail ingestion**: read exported `.eml` directories and `.mbox` files; Apple Mail adapter is a stub pending automation-based export.
+- **Mail ingestion**: read exported `.eml` directories, `.mbox` files, and **Apple Mail drop snapshots** (validated JSON files) under `MAILDROP_ROOT` (see ADR 0003).
 - **Digest**: primarily **deterministic Markdown** assembled in the application layer from SQLite snapshots (compact, copy/paste friendly). The digest LLM port remains for compatibility/experiments, but the default daily digest path does not depend on it.
 
 Details:
 
 - `docs/adr/0001-initial-architecture.md`
 - `docs/adr/0002-review-queue-and-low-memory-workflow.md`
+- `docs/adr/0003-apple-mail-drop-snapshot-format.md`
 
 ## LM Studio setup on a weak Mac (practical)
 
@@ -83,6 +84,45 @@ mail-assistant init-db
 mail-assistant ingest-eml --path ./data/inbox_eml
 mail-assistant ingest-mbox --path ./data/archive.mbox
 ```
+
+### 4b) Apple Mail drop workflow (macOS, local-first)
+
+This path is intentionally **not** “parse Mail’s internal DB” and **not** “store mailbox passwords”. Instead:
+
+**Apple Mail / Shortcuts / JXA → JSON snapshot files → `incoming/` → SQLite → triage / tasks / digest**
+
+1. Create the maildrop directories (idempotent):
+
+```bash
+mail-assistant prepare-maildrop --path ./data/maildrop
+```
+
+2. Configure macOS automation to write **one JSON file per message** into `./data/maildrop/incoming`.
+
+   - Helper script (JXA): `scripts/apple_mail/save_message_snapshot.js`
+   - Before running it, export `MAILDROP_INCOMING` to the **absolute** path of your `incoming/` folder.
+
+3. Ingest snapshots (moves successes to `processed/`, failures to `failed/`):
+
+```bash
+mail-assistant ingest-apple-mail-drop --path ./data/maildrop
+```
+
+4. Sanity-check the machine + paths + LM Studio reachability (best-effort HTTP probe):
+
+```bash
+mail-assistant doctor --repo-root "$(pwd)"
+```
+
+**Snapshot JSON contract (strictly validated):** see `app/application/apple_mail_snapshot.py` (`AppleMailDropSnapshotFile`). Minimum practical fields:
+
+- `snapshot_id` (string), `source` must be `"apple_mail_drop"`, `message_id` (string), `body_text` (string), `collected_at` (ISO datetime)
+- Optional: `thread_id`, mailbox/account names, recipients arrays, flags, `attachments_summary` (metadata only), `raw_metadata`
+
+**MVP limitations (honest):**
+
+- Apple Mail scripting is **best effort** for some metadata (see comments in `scripts/apple_mail/save_message_snapshot.js`).
+- Attachments are **not** ingested as binaries; only optional attachment metadata summaries are supported.
 
 ### 5) Run LLM stages (sequential)
 
@@ -128,7 +168,7 @@ mail-assistant build-digest --out ./data/digest.md
 
 ### 8) One-shot daily pipeline
 
-`run-daily` optionally ingests from paths configured in `.env` (`MAIL_EML_DIR`, `MAIL_MBOX_PATH`), then runs triage → extract → digest.
+`run-daily` optionally ingests from paths configured in `.env` (`MAIL_EML_DIR`, `MAIL_MBOX_PATH`, **`MAILDROP_ROOT`**), then runs triage → extract → digest.
 
 It prints a **compact stdout summary** (counts + ids). Full digest is only printed by `build-digest` (and can be written via `--digest-out` on `run-daily`).
 
@@ -144,14 +184,39 @@ pytest
 
 Tests use **fake/stub LLM ports** (and CLI smoke tests monkeypatch the LM Studio factory), **temporary SQLite files**, and do not require LM Studio or network access.
 
-## launchd (future scheduling)
+## launchd (macOS scheduling)
 
-Example plist: `app/scheduler/launchd/com.local.mailassistant.plist.example`
+Use the generator commands so you do not hand-edit fragile paths:
 
-Typical approach on macOS:
+```bash
+mail-assistant print-launchd --repo-root "$(pwd)" --digest-out "$(pwd)/data/digest.md"
+mail-assistant install-launchd --output ~/Library/LaunchAgents/com.local.mailassistant.plist --repo-root "$(pwd)"
+```
 
-- Install a LaunchAgent pointing at your venv `mail-assistant` entrypoint.
-- Provide a stable `WorkingDirectory` and log file paths.
+The generated plist runs `scripts/macos/run-mail-assistant-daily.sh`, which executes the venv Python with an explicit working directory (no interactive shell assumptions).
+
+**Wrapper environment variables:**
+
+- `MAIL_KANBAN_REPO_ROOT` (required): repository root
+- `MAIL_KANBAN_VENV_PYTHON` (optional): defaults to `$MAIL_KANBAN_REPO_ROOT/.venv/bin/python`
+- `MAIL_KANBAN_DIGEST_OUT` (optional): digest output path for `run-daily`
+- `MAILDROP_ROOT` (optional): passed through to ingestion defaults
+
+**launchctl (user session agent):**
+
+```bash
+mkdir -p ~/Library/Logs/mail-assistant
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.mailassistant.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.mailassistant.plist
+```
+
+Unload/restart:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.mailassistant.plist
+```
+
+Historical reference template: `app/scheduler/launchd/com.local.mailassistant.plist.example` (prefer `print-launchd` for real paths).
 
 ## Restart / catch-up behavior
 
@@ -164,15 +229,24 @@ Typical approach on macOS:
 - **Reviews**: partial unique indexes prevent unbounded duplicates of pending triage/task reviews.
 - **Runs**: `pipeline_runs` records start/end metadata for operational debugging.
 - **DB upgrades**: opening a DB runs lightweight `upgrade_schema()` (adds missing columns/tables for older local files).
+- **Apple Mail drop artifacts**: `ingested_artifacts` tracks `content_hash` + `snapshot_id` + status (`pending` / `processed` / `failed`) so restarts and backlog runs do not double-ingest the same snapshot file.
+
+## Recommended daily workflow (Mac)
+
+- Keep LM Studio running locally (or accept `doctor` warnings).
+- Let automation drop new JSON snapshots into `MAILDROP_ROOT/incoming` throughout the day.
+- On a schedule (launchd) or manually, run `mail-assistant run-daily --digest-out ./data/digest.md`.
+  - This ingests **EML/MBOX (if configured)** **and always attempts the maildrop** (empty `incoming/` is cheap).
+  - If the machine slept: the next run processes the accumulated backlog idempotently.
 
 ## Stubs / TODO
 
-- `app/infrastructure/mail/apple_mail_adapter.py`: placeholder reader (export/automation-first approach).
+- `app/infrastructure/mail/apple_mail_adapter.py`: legacy placeholder reader (kept for older “export to `.eml`” experiments). Prefer **`ingest-apple-mail-drop`** for the supported Apple Mail path.
 - `app/infrastructure/kanban/stub_adapter.py`: Kanban sync is logged-only.
 - Richer review UX (filters, bulk actions), richer digest inputs without bloating prompts.
 
 ## Next iteration (suggested)
 
-- Apple Mail export automation (Script Editor / Shortcuts) producing `.eml` into `MAIL_EML_DIR`.
+- Richer Mail automation templates (bulk selection helpers, safer HTML→text extraction) while keeping the JSON snapshot contract stable.
 - Real Kanban adapter behind `KanbanPort` with explicit rate limits + idempotent external IDs.
 - Optional short LLM “executive headline” separate from deterministic digest sections (still one prompt = one task).

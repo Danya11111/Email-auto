@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol, Sequence
 
 from app.application.dtos import (
     DailyDigestContextDTO,
     DigestLLMResponseDTO,
+    IngestedArtifactRecordDTO,
     IncomingMessageDTO,
     PersistedMessageDTO,
     ReviewEnqueueCommandDTO,
@@ -32,6 +34,9 @@ class MessageRepositoryPort(Protocol):
         body_normalized: str,
         processing_status: MessageProcessingStatus,
     ) -> int:
+        ...
+
+    def find_message_id_by_dedupe_key(self, dedupe_key: str) -> int | None:
         ...
 
     def list_messages_pending_triage(self, limit: int) -> Sequence[PersistedMessageDTO]:
@@ -150,4 +155,56 @@ class DigestContextPort(Protocol):
     def load_daily_digest_context(
         self, *, window_start: datetime, window_end: datetime, max_messages: int
     ) -> DailyDigestContextDTO:
+        ...
+
+
+class IngestedArtifactRepositoryPort(Protocol):
+    def maybe_find_artifact_by_hash_or_snapshot_id(
+        self, *, content_hash: str, snapshot_id: str | None
+    ) -> IngestedArtifactRecordDTO | None:
+        ...
+
+    def check_artifact_already_processed(self, *, content_hash: str) -> bool:
+        ...
+
+    def register_incoming_artifact(
+        self, *, content_hash: str, source_type: str, original_filename: str
+    ) -> int:
+        ...
+
+    def set_snapshot_id(self, artifact_id: int, snapshot_id: str) -> None:
+        ...
+
+    def mark_artifact_processed(self, *, artifact_id: int, related_message_id: int) -> None:
+        ...
+
+    def mark_artifact_failed(self, *, artifact_id: int, error_text: str) -> None:
+        ...
+
+    def reset_failed_artifact_to_pending(self, artifact_id: int) -> None:
+        ...
+
+    def find_artifact_with_snapshot_id(self, *, snapshot_id: str, exclude_artifact_id: int) -> IngestedArtifactRecordDTO | None:
+        ...
+
+
+class AppleMailDropScannerPort(Protocol):
+    def list_incoming_json_paths(self, maildrop_root: Path) -> Sequence[Path]:
+        ...
+
+
+class MaildropFilesystemPort(Protocol):
+    def ensure_maildrop_layout(self, maildrop_root: Path) -> None:
+        ...
+
+    def move_to_processed(self, src: Path, maildrop_root: Path) -> Path:
+        ...
+
+    def move_to_failed(self, src: Path, maildrop_root: Path) -> Path:
+        ...
+
+
+class HttpProbePort(Protocol):
+    def get_status(self, url: str, *, timeout_seconds: float) -> int | None:
+        """Return HTTP status code, or None if the request did not complete."""
         ...
