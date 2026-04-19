@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import NamedTuple
+
+from app.application.dtos import RunDailyResultDTO
+from app.application.llm_input import LlmTextPolicy
+from app.application.policies import TaskAutomationPolicy
+from app.application.use_cases import (
+    BuildMorningDigestUseCase,
+    ExtractTasksUseCase,
+    IngestMessagesUseCase,
+    TriageMessagesUseCase,
+)
+from app.application.use_cases.approve_review_item import ApproveReviewItemUseCase
+from app.application.use_cases.enqueue_review_items import EnqueueReviewItemsUseCase
+from app.application.use_cases.list_pending_reviews import ListPendingReviewsUseCase
+from app.application.use_cases.reject_review_item import RejectReviewItemUseCase
+from app.config import AppSettings
+from app.infrastructure.clock import SystemClock
+from app.infrastructure.kanban.stub_adapter import StubKanbanAdapter
+from app.infrastructure.llm.client import LmStudioStructuredClient
+from app.infrastructure.logging.logger import StructuredLoggerAdapter
+from app.infrastructure.mail.eml_reader import EmlDirectoryReader
+from app.infrastructure.mail.mbox_reader import MboxFileReader
+from app.infrastructure.storage.repositories import (
+    SqliteDigestContextRepository,
+    SqliteMessageRepository,
+    SqliteMorningDigestRepository,
+    SqlitePipelineRunRepository,
+    SqliteReviewRepository,
+    SqliteTaskRepository,
+    SqliteTriageRepository,
+)
+from app.infrastructure.storage.sqlite_db import initialize_database, open_connection
+from app.utils.ids import new_run_id
+
+_SCHEMA_PATH = Path(__file__).parent / "infrastructure" / "storage" / "schema.sql"
+
+
+def init_database(settings: AppSettings) -> None:
+    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = open_connection(settings.database_path)
+    try:
+        initialize_database(conn, _SCHEMA_PATH.read_text(encoding="utf-8"))
+    finally:
+        conn.close()
+
+
+def _llm_text_policy(settings: AppSettings) -> LlmTextPolicy:
+    return LlmTextPolicy(
+        max_input_chars=int(settings.llm_max_input_chars),
+        truncate_strategy=settings.message_body_truncate_strategy,
+    )
+
+
+def make_lm_studio_client(settings: AppSettings, logger: StructuredLoggerAdapter) -> LmStudioStructuredClient:
+    return LmStudioStructuredClient(
+        base_url=settings.lm_studio_base_url,
+        model=settings.lm_studio_model,
+        timeout_seconds=settings.lm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        max_output_tokens=int(settings.llm_max_output_tokens),
+        llm_text_policy=_llm_text_policy(settings),
+        logger=logger,
+    )
+
+
+class AppWiring(NamedTuple):
+    llm: LmStudioStructuredClient
+    messages: SqliteMessageRepository
+    triage_repo: SqliteTriageRepository
+    tasks_repo: SqliteTaskRepository
+    digests: SqliteMorningDigestRepository
+    pipeline: SqlitePipelineRunRepository
+    reviews: SqliteReviewRepository
+    digest_ctx: SqliteDigestContextRepository
+    enqueue_reviews: EnqueueReviewItemsUseCase
+    triage_uc: TriageMessagesUseCase
+    extract_uc: ExtractTasksUseCase
+    digest_uc: BuildMorningDigestUseCase
+    list_reviews_uc: ListPendingReviewsUseCase
+    approve_review_uc: ApproveReviewItemUseCase
+    reject_review_uc: RejectReviewItemUseCase
+
+
+def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, settings: AppSettings) -> AppWiring:
+    llm = make_lm_studio_client(settings, logger)
+    messages = SqliteMessageRepository(conn, clock)
+    triage_repo = SqliteTriageRepository(conn, clock)
+    tasks_repo = SqliteTaskRepository(conn, clock)
+    digests = SqliteMorningDigestRepository(conn, clock)
+    pipeline = SqlitePipelineRunRepository(conn, clock)
+    reviews = SqliteReviewRepository(conn, clock)
+    digest_ctx = SqliteDigestContextRepository(conn)
+
+    enqueue = EnqueueReviewItemsUseCase(reviews=reviews, logger=logger)
+    triage_uc = TriageMessagesUseCase(
+        messages=messages,
+        triage=triage_repo,
+        llm=llm,
+        logger=logger,
+        enqueue_reviews=enqueue,
+        review_threshold=float(settings.review_confidence_threshold),
+    )
+    kanban = StubKanbanAdapter(logger)
+    extract_uc = ExtractTasksUseCase(
+        messages=messages,
+        triage_repo=triage_repo,
+        tasks_llm=llm,
+        tasks=tasks_repo,
+        kanban=kanban,
+        logger=logger,
+        enqueue_reviews=enqueue,
+        review_threshold=float(settings.review_confidence_threshold),
+    )
+    digest_uc = BuildMorningDigestUseCase(
+        digest_context=digest_ctx,
+        digests=digests,
+        clock=clock,
+        logger=logger,
+        lookback_hours=int(settings.digest_lookback_hours),
+        digest_max_messages=int(settings.digest_max_messages),
+    )
+
+    list_reviews_uc = ListPendingReviewsUseCase(reviews=reviews)
+    approve_review_uc = ApproveReviewItemUseCase(
+        reviews=reviews,
+        messages=messages,
+        triage=triage_repo,
+        tasks=tasks_repo,
+        logger=logger,
+    )
+    reject_review_uc = RejectReviewItemUseCase(
+        reviews=reviews,
+        messages=messages,
+        triage=triage_repo,
+        tasks=tasks_repo,
+        logger=logger,
+    )
+
+    return AppWiring(
+        llm=llm,
+        messages=messages,
+        triage_repo=triage_repo,
+        tasks_repo=tasks_repo,
+        digests=digests,
+        pipeline=pipeline,
+        reviews=reviews,
+        digest_ctx=digest_ctx,
+        enqueue_reviews=enqueue,
+        triage_uc=triage_uc,
+        extract_uc=extract_uc,
+        digest_uc=digest_uc,
+        list_reviews_uc=list_reviews_uc,
+        approve_review_uc=approve_review_uc,
+        reject_review_uc=reject_review_uc,
+    )
+
+
+def format_run_daily_stdout_summary(
+    *,
+    run_id: str,
+    pipeline_db_id: int,
+    inserted_total: int,
+    duplicates_total: int,
+    triage: object,
+    extract: object,
+    digest_id: int,
+) -> str:
+    lines = [
+        f"run_id={run_id}",
+        f"pipeline_run_db_id={pipeline_db_id}",
+        f"ingest.inserted_total={inserted_total}",
+        f"ingest.duplicates_total={duplicates_total}",
+        f"triage.processed={getattr(triage, 'processed')}",
+        f"triage.failures={getattr(triage, 'failures')}",
+        f"triage.reviews_enqueued={getattr(triage, 'reviews_enqueued')}",
+        f"extract.messages_processed={getattr(extract, 'messages_processed')}",
+        f"extract.tasks_created={getattr(extract, 'tasks_created')}",
+        f"extract.failures={getattr(extract, 'failures')}",
+        f"extract.reviews_enqueued={getattr(extract, 'reviews_enqueued')}",
+        f"digest.digest_id={digest_id}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> RunDailyResultDTO:
+    """Run ingest (optional) → triage → extract → digest."""
+
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+
+    run_id = new_run_id()
+    logger.info("run_daily.start", run_id=run_id, app_env=settings.app_env)
+    pipeline_db_id = w.pipeline.start_run(run_id=run_id, command="run-daily")
+    policy = TaskAutomationPolicy(
+        confidence_threshold=settings.task_confidence_threshold,
+        auto_create_kanban=settings.auto_create_kanban_tasks,
+    )
+
+    ingest_uc = IngestMessagesUseCase(messages=w.messages, pipeline_runs=w.pipeline, logger=logger)
+
+    inserted_total = 0
+    duplicates_total = 0
+    try:
+        if settings.mail_eml_dir is not None:
+            res = ingest_uc.execute(
+                EmlDirectoryReader(settings.mail_eml_dir),
+                run_id=run_id,
+                command="run-daily:ingest-eml",
+                record_pipeline=False,
+            )
+            inserted_total += res.inserted
+            duplicates_total += res.duplicates
+
+        if settings.mail_mbox_path is not None:
+            res = ingest_uc.execute(
+                MboxFileReader(settings.mail_mbox_path),
+                run_id=run_id,
+                command="run-daily:ingest-mbox",
+                record_pipeline=False,
+            )
+            inserted_total += res.inserted
+            duplicates_total += res.duplicates
+
+        triage_res = w.triage_uc.execute(run_id=run_id, batch_limit=int(settings.triage_batch_size))
+        extract_res = w.extract_uc.execute(
+            run_id=run_id,
+            policy=policy,
+            batch_limit=int(settings.task_extraction_batch_size),
+        )
+
+        pipeline_stats: dict[str, object] = {
+            "ingest.inserted_total": inserted_total,
+            "ingest.duplicates_total": duplicates_total,
+            "triage.processed": triage_res.processed,
+            "triage.failures": triage_res.failures,
+            "triage.reviews_enqueued": triage_res.reviews_enqueued,
+            "extract.messages_processed": extract_res.messages_processed,
+            "extract.tasks_created": extract_res.tasks_created,
+            "extract.failures": extract_res.failures,
+            "extract.reviews_enqueued": extract_res.reviews_enqueued,
+        }
+
+        digest_res = w.digest_uc.execute(
+            run_id=run_id,
+            pipeline_run_db_id=pipeline_db_id,
+            pipeline_stats=pipeline_stats,
+        )
+
+        w.pipeline.finish_run(
+            pipeline_db_id,
+            status="ok",
+            metadata=json.dumps(
+                {
+                    "inserted": inserted_total,
+                    "duplicates": duplicates_total,
+                    "digest_id": digest_res.digest_id,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        if digest_output is not None:
+            digest_output.parent.mkdir(parents=True, exist_ok=True)
+            digest_output.write_text(digest_res.markdown, encoding="utf-8")
+
+        stdout_summary = format_run_daily_stdout_summary(
+            run_id=run_id,
+            pipeline_db_id=pipeline_db_id,
+            inserted_total=inserted_total,
+            duplicates_total=duplicates_total,
+            triage=triage_res,
+            extract=extract_res,
+            digest_id=digest_res.digest_id,
+        )
+
+        return RunDailyResultDTO(
+            run_id=run_id,
+            digest_markdown=digest_res.markdown,
+            stdout_summary=stdout_summary,
+            digest_id=digest_res.digest_id,
+        )
+    except Exception:
+        w.pipeline.finish_run(
+            pipeline_db_id,
+            status="error",
+            metadata=json.dumps({"error": "run-daily failed"}, ensure_ascii=False),
+        )
+        raise
+    finally:
+        w.llm.close()
+        conn.close()

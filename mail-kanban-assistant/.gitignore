@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+mail_kanban_assistant.egg-info/
+.DS_Store
+data/*.db
+data/*.sqlite
+!data/.gitkeep

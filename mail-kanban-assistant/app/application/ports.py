@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Protocol, Sequence
+
+from app.application.dtos import (
+    DailyDigestContextDTO,
+    DigestLLMResponseDTO,
+    IncomingMessageDTO,
+    PersistedMessageDTO,
+    ReviewEnqueueCommandDTO,
+    ReviewListItemDTO,
+    SavedCandidateTaskDTO,
+    TaskExtractionItemDTO,
+    TriageLLMResponseDTO,
+)
+from app.domain.enums import MessageProcessingStatus, ReviewKind, TaskStatus
+from app.domain.models import ExtractedTask, MorningDigest, TriageResult
+
+
+class MessageReaderPort(Protocol):
+    """Produces normalized messages from a concrete mail source."""
+
+    def read_messages(self) -> Sequence[IncomingMessageDTO]:
+        ...
+
+
+class MessageRepositoryPort(Protocol):
+    def insert_message(
+        self,
+        message: IncomingMessageDTO,
+        body_normalized: str,
+        processing_status: MessageProcessingStatus,
+    ) -> int:
+        ...
+
+    def list_messages_pending_triage(self, limit: int) -> Sequence[PersistedMessageDTO]:
+        ...
+
+    def list_messages_for_task_extraction(self, limit: int) -> Sequence[PersistedMessageDTO]:
+        ...
+
+    def list_messages_for_digest(self, window_start: datetime, window_end: datetime) -> Sequence[PersistedMessageDTO]:
+        ...
+
+    def update_processing_status(self, message_id: int, status: MessageProcessingStatus) -> None:
+        ...
+
+
+class TriageResultRepositoryPort(Protocol):
+    def save_triage(self, message_id: int, triage: TriageResult, raw_json: str) -> None:
+        ...
+
+    def has_triage(self, message_id: int) -> bool:
+        ...
+
+    def get_triage(self, message_id: int) -> TriageResult | None:
+        ...
+
+    def delete_for_message(self, message_id: int) -> None:
+        ...
+
+    def set_human_confirmed(self, message_id: int, *, confirmed: bool) -> None:
+        ...
+
+
+class TriageLLMPort(Protocol):
+    def triage_message(self, message: PersistedMessageDTO) -> TriageLLMResponseDTO:
+        ...
+
+
+class TaskExtractionLLMPort(Protocol):
+    def extract_tasks(self, message: PersistedMessageDTO, triage_summary: str) -> Sequence[TaskExtractionItemDTO]:
+        ...
+
+
+class DigestLLMPort(Protocol):
+    def build_digest_markdown(self, window_start: datetime, window_end: datetime, payload_json: str) -> DigestLLMResponseDTO:
+        ...
+
+
+class TaskRepositoryPort(Protocol):
+    def save_candidate_tasks(
+        self, message_id: int, tasks: Sequence[ExtractedTask], dedupe_keys: Sequence[str]
+    ) -> Sequence[SavedCandidateTaskDTO]:
+        ...
+
+    def update_task_status(self, task_id: int, status: TaskStatus) -> None:
+        ...
+
+    def message_has_candidate_tasks(self, message_id: int) -> bool:
+        ...
+
+
+class KanbanPort(Protocol):
+    def create_task_card(self, task: ExtractedTask, message: PersistedMessageDTO) -> str | None:
+        ...
+
+
+class ClockPort(Protocol):
+    def now(self) -> datetime:
+        ...
+
+
+class LoggerPort(Protocol):
+    def info(self, event: str, **fields: object) -> None:
+        ...
+
+    def warning(self, event: str, **fields: object) -> None:
+        ...
+
+    def error(self, event: str, **fields: object) -> None:
+        ...
+
+
+class MorningDigestRepositoryPort(Protocol):
+    def save_digest(self, pipeline_run_id: int | None, digest: MorningDigest) -> int:
+        ...
+
+
+class PipelineRunRepositoryPort(Protocol):
+    def start_run(self, run_id: str, command: str) -> int:
+        ...
+
+    def finish_run(self, db_id: int, status: str, metadata: str | None) -> None:
+        ...
+
+
+class ReviewRepositoryPort(Protocol):
+    def find_pending_duplicate(self, *, kind: ReviewKind, message_id: int, task_id: int | None) -> int | None:
+        ...
+
+    def enqueue(self, cmd: ReviewEnqueueCommandDTO) -> tuple[int, bool]:
+        ...
+
+    def list_pending(self, limit: int) -> Sequence[ReviewListItemDTO]:
+        ...
+
+    def get(self, review_id: int) -> ReviewListItemDTO:
+        ...
+
+    def approve(self, review_id: int, *, decided_by: str, note: str | None) -> None:
+        ...
+
+    def reject(self, review_id: int, *, decided_by: str, note: str | None) -> None:
+        ...
+
+
+class DigestContextPort(Protocol):
+    def load_daily_digest_context(
+        self, *, window_start: datetime, window_end: datetime, max_messages: int
+    ) -> DailyDigestContextDTO:
+        ...
