@@ -48,6 +48,7 @@ Details:
 - `docs/adr/0003-apple-mail-drop-snapshot-format.md`
 - `docs/adr/0004-kanban-sync-outbox.md`
 - `docs/adr/0005-yougile-kanban-provider.md`
+- `docs/adr/0006-yougile-onboarding-cli.md`
 
 ## LM Studio setup on a weak Mac (practical)
 
@@ -181,15 +182,7 @@ After tasks reach **`approved`** via the review queue, you can push them to a Ka
 
 **Why `local_file` stays the default:** it is zero-network, easy to inspect, and safe for experiments. YouGile is opt-in via `KANBAN_PROVIDER=yougile` once you have an API key and column UUIDs.
 
-**YouGile quick path**
-
-1. In YouGile, create an API key for your company (done in the product UI; the app never stores your login/password).
-2. Copy board id, column id for “TODO”, and optionally DONE/BLOCKED columns.
-3. Set env vars (`YOUGILE_BASE_URL`, `YOUGILE_API_KEY`, `YOUGILE_BOARD_ID`, `YOUGILE_COLUMN_ID_TODO`, …) and `KANBAN_PROVIDER=yougile`.
-4. `mail-assistant doctor --repo-root "$(pwd)"` — checks mandatory vars and runs a best-effort `GET …/boards/{id}` health probe when a board id is set.
-5. `mail-assistant kanban-preview` — shows `planned_create`, `planned_update`, `skip_same_fingerprint`, `skip_manual_resync`.
-6. `mail-assistant kanban-sync --dry-run` then `mail-assistant kanban-sync`.
-7. On failures: `mail-assistant kanban-retry-failed`.
+**YouGile onboarding (recommended)** — see **§7c** below for discovery, env templates, smoke sync on one task, and troubleshooting. Short path: API key → `yougile-discover` → paste ids into `.env` → `yougile-config-check` → `yougile-smoke-sync --task-id …` (dry-run) → `--execute` once → normal `kanban-sync`.
 
 **Idempotency / fingerprint**
 
@@ -209,11 +202,56 @@ mail-assistant kanban-preview
 mail-assistant kanban-sync --dry-run
 mail-assistant kanban-sync
 mail-assistant kanban-status
+mail-assistant kanban-status --probe   # YouGile: optional live GET checks
 mail-assistant kanban-retry-failed
 mail-assistant kanban-export-local
+
+# YouGile onboarding (see §7c)
+mail-assistant yougile-discover
+mail-assistant yougile-discover --json
+mail-assistant yougile-print-env
+mail-assistant yougile-doctor
+mail-assistant yougile-config-check
+mail-assistant yougile-smoke-sync --task-id 42
+mail-assistant yougile-smoke-sync --task-id 42 --execute
+mail-assistant yougile-cleanup-note
 ```
 
 `KANBAN_AUTO_SYNC=false` by default: automatic sync on approve / `run-daily` stays opt-in.
+
+### 7c) YouGile workspace onboarding (operational)
+
+Use these **application-layer** commands (they call YouGile read/write APIs only with `YOUGILE_API_KEY`; no password flow).
+
+**Step-by-step**
+
+1. Create an **API key** in YouGile (company settings). Store it in `YOUGILE_API_KEY` (never commit real keys).
+2. Set `YOUGILE_BASE_URL` (default `https://ru.yougile.com` is fine for the hosted cloud).
+3. Run **`mail-assistant yougile-discover`** (add `--json` for machine-readable output, `--compact` for dense rows). Lists **boards** (`GET /api-v2/boards`) and **columns** (`GET /api-v2/columns`), grouped by `boardId`, so you can copy UUIDs into `.env`.
+4. Paste ids into `.env` (`YOUGILE_BOARD_ID`, `YOUGILE_COLUMN_ID_TODO`, optional DONE/BLOCKED). **`mail-assistant yougile-print-env`** prints a ready-to-paste fragment; **`mail-assistant yougile-config-check`** prints the fragment plus **live** API checks.
+5. Set **`KANBAN_PROVIDER=yougile`** when you are ready to sync for real (until then you can keep `local_file` and pass `--force` on discover).
+6. **`mail-assistant yougile-doctor`** — focused YouGile-only checks (config + `GET /boards`, optional board/column probes). Use **`mail-assistant doctor --yougile-probe`** to append the same live checks to the full environment doctor. Add **`--json`** on `doctor` for JSON lines.
+7. **`mail-assistant kanban-status --probe`** — for YouGile, runs a tiny live probe (`/boards`, configured board, TODO column) after the usual SQLite counters.
+8. **`mail-assistant yougile-smoke-sync --task-id <internal id>`** — **dry-run by default** (plans with a smoke tag in title/description). Add **`--execute`** for a **single** approved task write. Requires `KANBAN_PROVIDER=yougile`.
+9. Normal **`mail-assistant kanban-sync`** for batch work after smoke looks good.
+
+**Smoke cleanup**
+
+There is **no automatic delete/archive** of YouGile tasks from this CLI (avoid destructive API assumptions). Smoke tasks include a searchable **`[mail-assistant-smoke:<task_id>]`** marker. Run **`mail-assistant yougile-cleanup-note`** for manual cleanup steps in the YouGile UI.
+
+**Troubleshooting**
+
+| Symptom | What to check |
+|--------|----------------|
+| `authentication failed` / HTTP 401 | Regenerate or paste `YOUGILE_API_KEY`; no extra quotes in `.env`. |
+| HTTP 403 | Key lacks permission for board/project. |
+| Board/column HTTP 404 | Wrong UUID; re-run `yougile-discover` and copy ids again. |
+| HTTP 429 | Rate limit — lower `YOUGILE_REQUESTS_PER_MINUTE`, space out syncs. |
+| Timeouts / connect errors | Network, firewall, or wrong `YOUGILE_BASE_URL`. |
+| `yougile-smoke-sync` “not approved” | Task must be `approved` in SQLite (`review-approve` first). |
+| No writes in dry-run | Expected — pass `--execute` only when ready. |
+
+Operational ADR: `docs/adr/0006-yougile-onboarding-cli.md`.
 
 ### 8) One-shot daily pipeline
 

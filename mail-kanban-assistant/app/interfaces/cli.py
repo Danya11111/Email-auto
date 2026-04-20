@@ -8,11 +8,21 @@ from typing import Optional
 
 import typer
 
-from app.application.doctor_report import DoctorEnvironmentUseCase
+from app.application.doctor_report import DoctorEnvironmentUseCase, DoctorReportDTO
 from app.application.launchd_plist import LaunchdPlistSpecDTO, render_launchd_plist_xml
 from app.application.policies import TaskAutomationPolicy
 from app.application.use_cases import IngestMessagesUseCase
 from app.application.use_cases.prepare_maildrop import PrepareMaildropUseCase
+from app.application.use_cases.kanban_sync import SyncApprovedTasksToKanbanUseCase
+from app.application.use_cases.yougile_workspace import (
+    YougileDiscoverWorkspaceUseCase,
+    YougileSmokeSyncUseCase,
+    build_yougile_env_fragment,
+    render_yougile_discovery_text,
+    run_yougile_deep_doctor,
+    run_yougile_live_status_probe,
+    yougile_cleanup_note_text,
+)
 from app.bootstrap import (
     build_kanban_wiring,
     build_process_apple_mail_drop_use_case,
@@ -30,6 +40,7 @@ from app.infrastructure.mail.eml_reader import EmlDirectoryReader
 from app.infrastructure.mail.mbox_reader import MboxFileReader
 from app.infrastructure.storage.repositories import SqlitePipelineRunRepository, SqliteTaskRepository
 from app.infrastructure.storage.sqlite_db import open_connection
+from app.infrastructure.storage.sqlite_kanban_sync_repository import SqliteKanbanSyncRepository
 from app.infrastructure.kanban.factory import make_kanban_port
 from app.utils.ids import new_run_id
 
@@ -300,6 +311,12 @@ def doctor_cmd(
         "--wrapper",
         help="Optional path to launchd wrapper script (defaults to <repo>/scripts/macos/run-mail-assistant-daily.sh).",
     ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON with structured doctor lines."),
+    yougile_probe: bool = typer.Option(
+        False,
+        "--yougile-probe",
+        help="Append live YouGile API checks when YOUGILE_API_KEY is set.",
+    ),
 ) -> None:
     settings = AppSettings()
     rr = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
@@ -307,7 +324,11 @@ def doctor_cmd(
     log = StructuredLoggerAdapter()
     uc = DoctorEnvironmentUseCase(http=UrllibHttpProbe())
     report = uc.execute(settings, repo_root=rr, wrapper_script=wr, kanban_port=make_kanban_port(settings, log))
-    typer.echo(report.render_text())
+    lines = list(report.lines)
+    if yougile_probe and settings.yougile_api_key.strip():
+        lines.extend(run_yougile_deep_doctor(settings, log))
+    merged = DoctorReportDTO(lines=tuple(lines))
+    typer.echo(merged.render_json() if as_json else merged.render_text())
 
 
 @app.command("kanban-preview")
@@ -382,6 +403,11 @@ def kanban_retry_failed_cmd(
 @app.command("kanban-status")
 def kanban_status_cmd(
     provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+    probe: bool = typer.Option(
+        False,
+        "--probe",
+        help="For YouGile: run a few live GET checks (boards/column) when API key is set.",
+    ),
 ) -> None:
     settings = AppSettings()
     conn = open_connection(settings.database_path)
@@ -396,6 +422,11 @@ def kanban_status_cmd(
     )
     if st.provider_readiness:
         typer.echo(f"  readiness: {st.provider_readiness}")
+    if probe and prov == KanbanProvider.YOUGILE:
+        for line in run_yougile_live_status_probe(settings, logger):
+            typer.echo(f"  {line}")
+    elif probe and prov != KanbanProvider.YOUGILE:
+        typer.echo("  probe: skipped (only meaningful for KANBAN_PROVIDER=yougile)")
     for err in st.last_errors:
         typer.echo(f"  err: {err[:300]}")
     conn.close()
@@ -414,6 +445,116 @@ def kanban_export_local_cmd() -> None:
     path = kb.export.execute()
     typer.echo(f"wrote {path}")
     conn.close()
+
+
+def _yougile_smoke_use_case(conn, clock, logger: StructuredLoggerAdapter, settings: AppSettings) -> YougileSmokeSyncUseCase:
+    tasks = SqliteTaskRepository(conn, clock)
+    sync_repo = SqliteKanbanSyncRepository(conn, clock)
+    sync_uc = SyncApprovedTasksToKanbanUseCase(
+        tasks=tasks,
+        sync=sync_repo,
+        kanban=make_kanban_port(settings, logger),
+        logger=logger,
+        settings=settings,
+    )
+    return YougileSmokeSyncUseCase(tasks=tasks, sync=sync_repo, sync_uc=sync_uc, settings=settings)
+
+
+@app.command("yougile-discover")
+def yougile_discover_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Print discovery as JSON."),
+    compact: bool = typer.Option(False, "--compact", help="One-line board/column rows."),
+    force: bool = typer.Option(False, "--force", help="Run even if KANBAN_PROVIDER is not yougile."),
+) -> None:
+    settings = AppSettings()
+    if settings.kanban_provider != KanbanProvider.YOUGILE and not force:
+        typer.echo(
+            "WARN: KANBAN_PROVIDER is not yougile; discovery still runs using YOUGILE_* env. "
+            "Use --force to silence this hint.",
+            err=True,
+        )
+    log = StructuredLoggerAdapter()
+    uc = YougileDiscoverWorkspaceUseCase(settings=settings, logger=log)
+    dto = uc.execute()
+    if as_json:
+        typer.echo(json.dumps(dto.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_yougile_discovery_text(dto, compact=compact, base_url_for_env=str(settings.yougile_base_url)))
+
+
+@app.command("yougile-print-env")
+def yougile_print_env_cmd(
+    board_id: Optional[str] = typer.Option(None, "--board-id", help="Override YOUGILE_BOARD_ID for the template."),
+    column_todo: Optional[str] = typer.Option(None, "--column-todo", help="Override YOUGILE_COLUMN_ID_TODO for the template."),
+) -> None:
+    settings = AppSettings()
+    typer.echo(build_yougile_env_fragment(settings, board_id=board_id, column_todo=column_todo))
+
+
+@app.command("yougile-doctor")
+def yougile_doctor_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON lines array."),
+) -> None:
+    settings = AppSettings()
+    log = StructuredLoggerAdapter()
+    lines = run_yougile_deep_doctor(settings, log)
+    if as_json:
+        typer.echo(json.dumps({"lines": [{"level": l.level, "message": l.message} for l in lines]}, ensure_ascii=False, indent=2))
+    else:
+        typer.echo("YouGile operational doctor")
+        typer.echo("")
+        for line in lines:
+            typer.echo(f"[{line.level}] {line.message}")
+
+
+@app.command("yougile-config-check")
+def yougile_config_check_cmd() -> None:
+    settings = AppSettings()
+    typer.echo("--- Suggested .env fragment (fill secrets / ids) ---\n")
+    typer.echo(build_yougile_env_fragment(settings, board_id=None, column_todo=None))
+    typer.echo("--- Live API checks ---\n")
+    log = StructuredLoggerAdapter()
+    for line in run_yougile_deep_doctor(settings, log):
+        typer.echo(f"[{line.level}] {line.message}")
+
+
+@app.command("yougile-smoke-sync")
+def yougile_smoke_sync_cmd(
+    task_id: int = typer.Option(..., "--task-id", help="Internal extracted_tasks.id (must be approved)."),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Perform one real sync; default is dry-run preview only.",
+    ),
+) -> None:
+    settings = AppSettings()
+    if settings.kanban_provider != KanbanProvider.YOUGILE:
+        typer.echo("FAIL: KANBAN_PROVIDER must be yougile for smoke sync.", err=True)
+        raise typer.Exit(code=1)
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    try:
+        uc = _yougile_smoke_use_case(conn, clock, logger, settings)
+        run_id = new_run_id()
+        res = uc.execute(task_id=task_id, dry_run=not execute, run_id=run_id)
+        typer.echo(f"task_id={res.task_id} approved={res.task_approved} dry_run={res.dry_run} plan={res.plan}")
+        typer.echo(res.message)
+        if res.external_task_id:
+            typer.echo(f"external_task_id={res.external_task_id}")
+        if res.external_url:
+            typer.echo(f"external_url={res.external_url}")
+        if not res.task_approved:
+            raise typer.Exit(code=1)
+        if res.failed and not res.dry_run:
+            raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
+@app.command("yougile-cleanup-note")
+def yougile_cleanup_note_cmd() -> None:
+    typer.echo(yougile_cleanup_note_text())
 
 
 def _default_launchd_log_paths(repo_root: Path) -> tuple[Path, Path]:

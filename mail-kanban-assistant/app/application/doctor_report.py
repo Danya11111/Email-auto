@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
@@ -25,6 +26,10 @@ class DoctorReportDTO:
             out.append(f"[{line.level}] {line.message}")
         out.append("")
         return "\n".join(out)
+
+    def render_json(self) -> str:
+        payload = {"lines": [{"level": line.level, "message": line.message} for line in self.lines]}
+        return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 @dataclass(frozen=True, slots=True)

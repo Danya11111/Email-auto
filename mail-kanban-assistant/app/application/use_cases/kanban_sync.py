@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -61,7 +62,13 @@ class PreviewKanbanSyncCandidatesUseCase:
     logger: LoggerPort
     settings: AppSettings
 
-    def execute(self, *, provider: KanbanProvider, limit: int) -> KanbanPreviewSummaryDTO:
+    def execute(
+        self,
+        *,
+        provider: KanbanProvider,
+        limit: int,
+        draft_hook: Callable[[KanbanCardDraft], KanbanCardDraft] | None = None,
+    ) -> KanbanPreviewSummaryDTO:
         opts = mapping_options_from_settings(self.settings)
         contexts = list(self.tasks.list_approved_tasks_for_kanban(limit=limit))
         ready = 0
@@ -75,6 +82,8 @@ class PreviewKanbanSyncCandidatesUseCase:
                 continue
             ready += 1
             draft = build_kanban_card_draft(ctx, opts)
+            if draft_hook is not None:
+                draft = draft_hook(draft)
             plan = plan_kanban_outbound(
                 provider=provider,
                 settings=self.settings,
@@ -131,6 +140,7 @@ class SyncApprovedTasksToKanbanUseCase:
         dry_run: bool = False,
         limit: int | None = None,
         only_task_id: int | None = None,
+        draft_hook: Callable[[KanbanCardDraft], KanbanCardDraft] | None = None,
     ) -> KanbanSyncBatchResultDTO:
         started = time.perf_counter()
         lim = int(limit) if limit is not None else int(self.settings.kanban_sync_batch_size)
@@ -170,6 +180,8 @@ class SyncApprovedTasksToKanbanUseCase:
                 continue
             found += 1
             draft = build_kanban_card_draft(ctx, opts)
+            if draft_hook is not None:
+                draft = draft_hook(draft)
             plan = plan_kanban_outbound(
                 provider=provider,
                 settings=self.settings,

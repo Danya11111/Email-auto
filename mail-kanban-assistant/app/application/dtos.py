@@ -359,3 +359,47 @@ class KanbanStatusSummaryDTO:
     skipped: int
     last_errors: tuple[str, ...]
     provider_readiness: str | None = None
+
+
+class YougileDiscoveryBoardDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    id: str
+    title: str
+    deleted: bool = False
+    project_id: str | None = None
+
+
+class YougileDiscoveryColumnDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    id: str
+    title: str
+    board_id: str
+    deleted: bool = False
+
+
+class YougileWorkspaceDiscoveryDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    ok: bool
+    error: str | None = None
+    boards: tuple[YougileDiscoveryBoardDTO, ...] = Field(default_factory=tuple)
+    columns: tuple[YougileDiscoveryColumnDTO, ...] = Field(default_factory=tuple)
+    warnings: tuple[str, ...] = Field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class YougileSmokeSyncResultDTO:
+    task_id: int
+    dry_run: bool
+    task_approved: bool
+    plan: str | None
+    run_id: str
+    message: str
+    external_task_id: str | None = None
+    external_url: str | None = None
+    synced: int = 0
+    updated: int = 0
+    skipped: int = 0
+    failed: int = 0

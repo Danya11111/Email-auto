@@ -9,6 +9,7 @@ import httpx
 
 from app.application.dtos import PersistedMessageDTO
 from app.application.ports import KanbanPort, LoggerPort
+from app.application.yougile_errors import format_yougile_provider_error, format_yougile_transport_error
 from app.domain.enums import KanbanCardStatus
 from app.domain.models import ExtractedTask, KanbanCardDraft, KanbanProviderCreateResult
 
@@ -152,22 +153,13 @@ class YougileKanbanAdapter(KanbanPort):
                 return tid2.strip()
         return None
 
-    def _error_message(self, resp: httpx.Response) -> str:
-        try:
-            doc = resp.json()
-            if isinstance(doc, dict) and doc.get("error"):
-                return f"HTTP {resp.status_code}: {doc.get('error')}"
-        except json.JSONDecodeError:
-            pass
-        return f"HTTP {resp.status_code}: {resp.text[:800]}"
-
     def _request_json(
         self,
         method: str,
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
-    ) -> tuple[int, Any]:
+    ) -> tuple[int, Any, str]:
         """Single HTTP round-trip (no automatic POST retry to avoid duplicate tasks)."""
         self._limiter.wait_turn()
         url = f"{self._api}{path}" if path.startswith("/") else f"{self._api}/{path}"
@@ -178,10 +170,11 @@ class YougileKanbanAdapter(KanbanPort):
         self.logger_info_latency(method, path, resp.status_code, ms)
         if resp.status_code == 429:
             self._logger.warning("kanban.yougile.rate_limited", status=429, hint="space_sync_runs_or_raise_rpm_slightly")
+        raw = resp.text[:4000]
         try:
-            return resp.status_code, resp.json()
+            return resp.status_code, resp.json(), raw
         except json.JSONDecodeError:
-            return resp.status_code, None
+            return resp.status_code, None, raw
 
     def logger_info_latency(self, method: str, path: str, status: int, ms: int) -> None:
         self._logger.info(
@@ -210,9 +203,14 @@ class YougileKanbanAdapter(KanbanPort):
         if dl is not None:
             body["deadline"] = dl
         try:
-            status, data = self._request_json("POST", "/tasks", json_body=body)
+            status, data, raw = self._request_json("POST", "/tasks", json_body=body)
             if status not in (200, 201):
-                return KanbanProviderCreateResult(False, None, None, self._error_message_from_status(status, data))
+                return KanbanProviderCreateResult(
+                    False,
+                    None,
+                    None,
+                    format_yougile_provider_error(status_code=status, data=data, fallback_body=raw, context="create task"),
+                )
             tid = self._parse_task_id(data)
             if not tid:
                 return KanbanProviderCreateResult(False, None, None, "YouGile create: missing task id in response")
@@ -221,12 +219,7 @@ class YougileKanbanAdapter(KanbanPort):
             return KanbanProviderCreateResult(True, tid, url, None)
         except httpx.HTTPError as exc:
             self._logger.error("kanban.yougile.http_error", error=str(exc))
-            return KanbanProviderCreateResult(False, None, None, str(exc))
-
-    def _error_message_from_status(self, status: int, data: Any) -> str:
-        if isinstance(data, dict) and data.get("error"):
-            return f"HTTP {status}: {data.get('error')}"
-        return f"HTTP {status}: empty or non-JSON body"
+            return KanbanProviderCreateResult(False, None, None, format_yougile_transport_error(exc, context="create task"))
 
     def update_card(self, draft: KanbanCardDraft, *, external_card_id: str) -> KanbanProviderCreateResult:
         err = self._config_error()
@@ -245,15 +238,20 @@ class YougileKanbanAdapter(KanbanPort):
         if dl is not None:
             body["deadline"] = dl
         try:
-            status, data = self._request_json("PUT", f"/tasks/{tid}", json_body=body)
+            status, data, raw = self._request_json("PUT", f"/tasks/{tid}", json_body=body)
             if status not in (200, 201):
-                return KanbanProviderCreateResult(False, None, None, self._error_message_from_status(status, data))
+                return KanbanProviderCreateResult(
+                    False,
+                    None,
+                    None,
+                    format_yougile_provider_error(status_code=status, data=data, fallback_body=raw, context="update task"),
+                )
             self._logger.info("kanban.yougile.task_updated", task_id=tid)
             url = self._task_url(tid)
             return KanbanProviderCreateResult(True, tid, url, None)
         except httpx.HTTPError as exc:
             self._logger.error("kanban.yougile.http_error", error=str(exc))
-            return KanbanProviderCreateResult(False, None, None, str(exc))
+            return KanbanProviderCreateResult(False, None, None, format_yougile_transport_error(exc, context="update task"))
 
     def healthcheck(self) -> bool:
         if self._config_error():
@@ -261,7 +259,7 @@ class YougileKanbanAdapter(KanbanPort):
         if not self._board_id:
             return False
         try:
-            status, _ = self._request_json("GET", f"/boards/{self._board_id}")
+            status, _, _ = self._request_json("GET", f"/boards/{self._board_id}")
             return status == 200
         except httpx.HTTPError:
             return False
