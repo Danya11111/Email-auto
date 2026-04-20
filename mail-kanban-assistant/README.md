@@ -47,6 +47,7 @@ Details:
 - `docs/adr/0002-review-queue-and-low-memory-workflow.md`
 - `docs/adr/0003-apple-mail-drop-snapshot-format.md`
 - `docs/adr/0004-kanban-sync-outbox.md`
+- `docs/adr/0005-yougile-kanban-provider.md`
 
 ## LM Studio setup on a weak Mac (practical)
 
@@ -174,8 +175,32 @@ The digest includes a short **Kanban sync** section when the DB has sync state (
 After tasks reach **`approved`** via the review queue, you can push them to a Kanban provider in an **idempotent** way:
 
 - **`local_file`** (default): writes `task_<id>.json` under `KANBAN_ROOT_DIR/cards/` and can export `board.md`.
+- **`yougile`**: creates tasks in a YouGile column via **YouGile REST API v2** (`https://…/api-v2/tasks`) using **`Authorization: Bearer <YOUGILE_API_KEY>`** only (no account password in this app). See `.env.example` and `docs/adr/0005-yougile-kanban-provider.md`.
 - **`trello`**: creates cards via the REST API (set `TRELLO_*` in `.env`; see `doctor`).
 - **`stub`**: no external side effects (useful for dry runs / tests).
+
+**Why `local_file` stays the default:** it is zero-network, easy to inspect, and safe for experiments. YouGile is opt-in via `KANBAN_PROVIDER=yougile` once you have an API key and column UUIDs.
+
+**YouGile quick path**
+
+1. In YouGile, create an API key for your company (done in the product UI; the app never stores your login/password).
+2. Copy board id, column id for “TODO”, and optionally DONE/BLOCKED columns.
+3. Set env vars (`YOUGILE_BASE_URL`, `YOUGILE_API_KEY`, `YOUGILE_BOARD_ID`, `YOUGILE_COLUMN_ID_TODO`, …) and `KANBAN_PROVIDER=yougile`.
+4. `mail-assistant doctor --repo-root "$(pwd)"` — checks mandatory vars and runs a best-effort `GET …/boards/{id}` health probe when a board id is set.
+5. `mail-assistant kanban-preview` — shows `planned_create`, `planned_update`, `skip_same_fingerprint`, `skip_manual_resync`.
+6. `mail-assistant kanban-sync --dry-run` then `mail-assistant kanban-sync`.
+7. On failures: `mail-assistant kanban-retry-failed`.
+
+**Idempotency / fingerprint**
+
+- SQLite `kanban_sync_records` stores `card_fingerprint` and `external_card_id` per `(task_id, provider)`.
+- Same fingerprint as the last **synced** row → **skip** (no duplicate POST).
+- **YouGile:** if the fingerprint **changes** after a successful sync, the safe default is **`YOUGILE_ENABLE_UPDATE_EXISTING=false`**: the run **skips** and marks the row skipped (no silent second task). Set `YOUGILE_ENABLE_UPDATE_EXISTING=true` to **PUT** title/description/deadline/column on the existing YouGile task.
+- **local_file:** same path is overwritten — treated as **create** path in code (no duplicate files).
+
+**Rate limits**
+
+YouGile documents **≤ 50 HTTP requests per minute per company**. This integration spaces requests sequentially and defaults `YOUGILE_REQUESTS_PER_MINUTE=40`. There is **no aggressive POST retry** (retries could create duplicate tasks).
 
 Commands:
 

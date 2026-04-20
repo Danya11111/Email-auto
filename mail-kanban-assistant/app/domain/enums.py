@@ -74,6 +74,7 @@ class KanbanProvider(StrEnum):
     STUB = "stub"
     LOCAL_FILE = "local_file"
     TRELLO = "trello"
+    YOUGILE = "yougile"
 
 
 class KanbanSyncStatus(StrEnum):

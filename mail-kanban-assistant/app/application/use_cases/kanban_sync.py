@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from app.application.dtos import (
@@ -12,6 +12,7 @@ from app.application.dtos import (
     KanbanSyncBatchResultDTO,
 )
 from app.application.kanban_mapping import KanbanMappingOptions, build_kanban_card_draft
+from app.application.kanban_resync_policy import KanbanOutboundPlan, plan_kanban_outbound
 from app.application.ports import KanbanPort, KanbanSyncRepositoryPort, LoggerPort, TaskRepositoryPort
 from app.config import AppSettings
 from app.domain.enums import KanbanProvider, TaskStatus
@@ -35,6 +36,24 @@ def mapping_options_from_settings(settings: AppSettings) -> KanbanMappingOptions
     )
 
 
+def kanban_status_readiness_hint(settings: AppSettings, provider: KanbanProvider) -> str | None:
+    if provider != KanbanProvider.YOUGILE:
+        return None
+    missing: list[str] = []
+    if not settings.yougile_api_key.strip():
+        missing.append("YOUGILE_API_KEY")
+    if not settings.yougile_column_id_todo.strip():
+        missing.append("YOUGILE_COLUMN_ID_TODO")
+    if missing:
+        return "YouGile: FAIL — " + ", ".join(missing)
+    parts: list[str] = ["YouGile: required settings present"]
+    if not settings.yougile_board_id.strip():
+        parts.append("YOUGILE_BOARD_ID empty (adapter healthcheck will be weak)")
+    if not settings.yougile_enable_update_existing:
+        parts.append("in-place updates after fingerprint change disabled (YOUGILE_ENABLE_UPDATE_EXISTING=false)")
+    return "; ".join(parts)
+
+
 @dataclass(frozen=True, slots=True)
 class PreviewKanbanSyncCandidatesUseCase:
     tasks: TaskRepositoryPort
@@ -46,35 +65,53 @@ class PreviewKanbanSyncCandidatesUseCase:
         opts = mapping_options_from_settings(self.settings)
         contexts = list(self.tasks.list_approved_tasks_for_kanban(limit=limit))
         ready = 0
-        skip = 0
-        sync_n = 0
+        skip_same = 0
+        skip_manual = 0
+        creates = 0
+        updates = 0
         sample: list[int] = []
         for ctx in contexts:
             if ctx.task.status != TaskStatus.APPROVED:
                 continue
             ready += 1
             draft = build_kanban_card_draft(ctx, opts)
-            if self.sync.maybe_skip_if_already_synced_same_fingerprint(
-                task_id=ctx.task.id, provider=provider, fingerprint=draft.fingerprint
-            ):
-                skip += 1
-                continue
-            sync_n += 1
-            if len(sample) < 10:
-                sample.append(ctx.task.id)
+            plan = plan_kanban_outbound(
+                provider=provider,
+                settings=self.settings,
+                sync=self.sync,
+                task_id=ctx.task.id,
+                draft=draft,
+            )
+            if plan == KanbanOutboundPlan.SKIP_SAME_FINGERPRINT:
+                skip_same += 1
+            elif plan == KanbanOutboundPlan.SKIP_MANUAL_RESYNC:
+                skip_manual += 1
+            elif plan == KanbanOutboundPlan.UPDATE_EXISTING:
+                updates += 1
+                if len(sample) < 10:
+                    sample.append(ctx.task.id)
+            else:
+                creates += 1
+                if len(sample) < 10:
+                    sample.append(ctx.task.id)
         self.logger.info(
             "kanban.preview",
             provider=provider.value,
             approved_ready=ready,
-            would_skip=skip,
-            would_sync=sync_n,
+            skip_same_fp=skip_same,
+            skip_manual=skip_manual,
+            planned_creates=creates,
+            planned_updates=updates,
         )
         return KanbanPreviewSummaryDTO(
             provider=provider,
             approved_ready=ready,
-            would_skip_already_synced=skip,
-            would_sync_or_retry=sync_n,
+            would_skip_already_synced=skip_same,
+            would_sync_or_retry=creates + updates,
             sample_task_ids=tuple(sample),
+            planned_creates=creates,
+            planned_updates=updates,
+            planned_skip_manual_resync=skip_manual,
         )
 
 
@@ -102,6 +139,7 @@ class SyncApprovedTasksToKanbanUseCase:
 
         found = 0
         synced = 0
+        updated = 0
         skipped = 0
         failed = 0
         dry_planned = 0
@@ -115,7 +153,14 @@ class SyncApprovedTasksToKanbanUseCase:
                     found += 1
                     skipped += 1
             return KanbanSyncBatchResultDTO(
-                run_id=run_id, found=found, synced=0, skipped=skipped, failed=0, dry_run=dry_run, dry_run_planned=0
+                run_id=run_id,
+                found=found,
+                synced=0,
+                updated=0,
+                skipped=skipped,
+                failed=0,
+                dry_run=dry_run,
+                dry_run_planned=0,
             )
 
         for ctx in contexts:
@@ -125,13 +170,64 @@ class SyncApprovedTasksToKanbanUseCase:
                 continue
             found += 1
             draft = build_kanban_card_draft(ctx, opts)
-            if self.sync.maybe_skip_if_already_synced_same_fingerprint(
-                task_id=ctx.task.id, provider=provider, fingerprint=draft.fingerprint
-            ):
+            plan = plan_kanban_outbound(
+                provider=provider,
+                settings=self.settings,
+                sync=self.sync,
+                task_id=ctx.task.id,
+                draft=draft,
+            )
+            if plan == KanbanOutboundPlan.SKIP_SAME_FINGERPRINT:
                 skipped += 1
+                continue
+            if plan == KanbanOutboundPlan.SKIP_MANUAL_RESYNC:
+                existing = self.sync.get_sync_record_for_task(ctx.task.id, provider)
+                if existing is not None:
+                    self.sync.mark_sync_skipped(
+                        record_id=existing.id,
+                        reason="fingerprint_changed_policy_skip_yougile_updates_disabled",
+                    )
+                skipped += 1
+                self.logger.info("kanban.sync.skip_manual_resync", run_id=run_id, task_id=ctx.task.id)
                 continue
             if dry_run:
                 dry_planned += 1
+                continue
+
+            if plan == KanbanOutboundPlan.UPDATE_EXISTING:
+                existing = self.sync.get_sync_record_for_task(ctx.task.id, provider)
+                ext_before = (existing.external_card_id or "").strip() if existing is not None else ""
+                if not ext_before:
+                    rid = self.sync.upsert_pending_sync_record(
+                        task_id=ctx.task.id,
+                        provider=provider,
+                        fingerprint=draft.fingerprint,
+                        payload_json=_draft_payload_json(draft),
+                    )
+                    result = self.kanban.create_card(draft)
+                else:
+                    rid = existing.id
+                    result = self.kanban.update_card(draft, external_card_id=ext_before)
+                if result.success:
+                    ext_final = (result.external_card_id or "").strip() or ext_before or None
+                    self.sync.mark_sync_success(
+                        record_id=rid,
+                        fingerprint=draft.fingerprint,
+                        external_card_id=ext_final,
+                        external_card_url=result.external_card_url,
+                    )
+                    self.tasks.update_task_status(ctx.task.id, TaskStatus.SYNCED)
+                    if ext_before:
+                        updated += 1
+                        self.logger.info("kanban.sync.task_updated", run_id=run_id, task_id=ctx.task.id, record_id=rid)
+                    else:
+                        synced += 1
+                        self.logger.info("kanban.sync.task_synced", run_id=run_id, task_id=ctx.task.id, record_id=rid)
+                else:
+                    msg = result.error_message or "unknown_error"
+                    self.sync.mark_sync_failed(record_id=rid, error=msg)
+                    failed += 1
+                    self.logger.warning("kanban.sync.task_update_failed", run_id=run_id, task_id=ctx.task.id, error=msg)
                 continue
 
             rid = self.sync.upsert_pending_sync_record(
@@ -164,6 +260,7 @@ class SyncApprovedTasksToKanbanUseCase:
             duration_ms=duration_ms,
             found=found,
             synced=synced,
+            updated=updated,
             skipped=skipped,
             failed=failed,
             dry_run=dry_run,
@@ -172,6 +269,7 @@ class SyncApprovedTasksToKanbanUseCase:
             run_id=run_id,
             found=found,
             synced=synced,
+            updated=updated,
             skipped=skipped,
             failed=failed,
             dry_run=dry_run,
@@ -206,13 +304,18 @@ class RetryFailedKanbanSyncUseCase:
                 continue
             attempted += 1
             draft = build_kanban_card_draft(ctx, opts)
-            rid = self.sync.upsert_pending_sync_record(
-                task_id=rec.task_id,
-                provider=provider,
-                fingerprint=draft.fingerprint,
-                payload_json=_draft_payload_json(draft),
-            )
-            result = self.kanban.create_card(draft)
+            ext = (rec.external_card_id or "").strip()
+            if provider in (KanbanProvider.YOUGILE, KanbanProvider.TRELLO) and ext and draft.fingerprint == rec.card_fingerprint:
+                result = self.kanban.update_card(draft, external_card_id=ext)
+                rid = rec.id
+            else:
+                rid = self.sync.upsert_pending_sync_record(
+                    task_id=rec.task_id,
+                    provider=provider,
+                    fingerprint=draft.fingerprint,
+                    payload_json=_draft_payload_json(draft),
+                )
+                result = self.kanban.create_card(draft)
             if result.success:
                 self.sync.mark_sync_success(
                     record_id=rid,
@@ -237,7 +340,9 @@ class ListKanbanSyncStatusUseCase:
 
     def execute(self, *, provider: KanbanProvider | None = None) -> KanbanStatusSummaryDTO:
         p = provider or self.settings.kanban_provider
-        return self.sync.load_status_summary(p)
+        base = self.sync.load_status_summary(p)
+        hint = kanban_status_readiness_hint(self.settings, p)
+        return replace(base, provider_readiness=hint)
 
 
 @dataclass(frozen=True, slots=True)

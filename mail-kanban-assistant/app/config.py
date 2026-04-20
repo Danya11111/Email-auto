@@ -69,6 +69,25 @@ class AppSettings(BaseSettings):
     trello_list_id_done: str = Field(default="", validation_alias="TRELLO_LIST_ID_DONE")
     trello_list_id_blocked: str = Field(default="", validation_alias="TRELLO_LIST_ID_BLOCKED")
 
+    yougile_base_url: str = Field(default="https://ru.yougile.com", validation_alias="YOUGILE_BASE_URL")
+    yougile_api_key: str = Field(default="", validation_alias="YOUGILE_API_KEY")
+    yougile_company_id: str = Field(default="", validation_alias="YOUGILE_COMPANY_ID")
+    yougile_board_id: str = Field(default="", validation_alias="YOUGILE_BOARD_ID")
+    yougile_column_id_todo: str = Field(default="", validation_alias="YOUGILE_COLUMN_ID_TODO")
+    yougile_column_id_done: str = Field(default="", validation_alias="YOUGILE_COLUMN_ID_DONE")
+    yougile_column_id_blocked: str = Field(default="", validation_alias="YOUGILE_COLUMN_ID_BLOCKED")
+    yougile_request_timeout_seconds: float = Field(default=25.0, validation_alias="YOUGILE_REQUEST_TIMEOUT_SECONDS")
+    yougile_requests_per_minute: int = Field(default=40, validation_alias="YOUGILE_REQUESTS_PER_MINUTE")
+    yougile_enable_update_existing: bool = Field(default=False, validation_alias="YOUGILE_ENABLE_UPDATE_EXISTING")
+    yougile_include_internal_ids: bool = Field(default=True, validation_alias="YOUGILE_INCLUDE_INTERNAL_IDS")
+    yougile_attach_source_metadata: bool = Field(default=True, validation_alias="YOUGILE_ATTACH_SOURCE_METADATA")
+    yougile_max_description_chars: int = Field(default=12000, validation_alias="YOUGILE_MAX_DESCRIPTION_CHARS")
+    yougile_priority_sticker_name: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STICKER_NAME")
+    yougile_priority_state_low: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_LOW")
+    yougile_priority_state_medium: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_MEDIUM")
+    yougile_priority_state_high: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_HIGH")
+    yougile_priority_state_critical: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_CRITICAL")
+
     @field_validator("mail_eml_dir", "mail_mbox_path", mode="before")
     @classmethod
     def _empty_paths_to_none(cls, value: object) -> object:
@@ -104,6 +123,52 @@ class AppSettings(BaseSettings):
     def _normalize_kanban_default_status(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().lower()
+        return value
+
+    @field_validator("yougile_base_url", mode="before")
+    @classmethod
+    def _strip_yougile_base(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.strip():
+            return "https://ru.yougile.com"
+        return value.strip().rstrip("/")
+
+    @field_validator("yougile_requests_per_minute")
+    @classmethod
+    def _clamp_yougile_rpm(cls, value: int) -> int:
+        v = int(value)
+        if v < 1:
+            return 1
+        if v > 50:
+            return 50
+        return v
+
+    @field_validator(
+        "yougile_api_key",
+        "yougile_company_id",
+        "yougile_board_id",
+        "yougile_column_id_todo",
+        "yougile_column_id_done",
+        "yougile_column_id_blocked",
+        "yougile_priority_sticker_name",
+        "yougile_priority_state_low",
+        "yougile_priority_state_medium",
+        "yougile_priority_state_high",
+        "yougile_priority_state_critical",
+        mode="before",
+    )
+    @classmethod
+    def _strip_optional_yougile_strings(cls, value: object) -> object:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("yougile_enable_update_existing", "yougile_include_internal_ids", "yougile_attach_source_metadata", mode="before")
+    @classmethod
+    def _bool_yougile_flags(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
         return value
 
     @field_validator("llm_concurrency")

@@ -69,6 +69,42 @@ class TrelloKanbanAdapter(KanbanPort):
             self._logger.error("kanban.trello.http_error", error=str(exc))
             return KanbanProviderCreateResult(success=False, external_card_id=None, external_card_url=None, error_message=str(exc))
 
+    def update_card(self, draft: KanbanCardDraft, *, external_card_id: str) -> KanbanProviderCreateResult:
+        if not self._api_key or not self._token or not external_card_id.strip():
+            return KanbanProviderCreateResult(
+                success=False,
+                external_card_id=None,
+                external_card_url=None,
+                error_message="Missing Trello credentials or external_card_id",
+            )
+        params = {
+            "key": self._api_key,
+            "token": self._token,
+            "name": draft.title[:16384],
+            "desc": draft.description[:16384],
+        }
+        if draft.due_at is not None:
+            params["due"] = draft.due_at.isoformat()
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                resp = client.put(f"{self._BASE}/cards/{external_card_id.strip()}", params=params)
+            if resp.status_code >= 400:
+                body = resp.text[:800]
+                return KanbanProviderCreateResult(
+                    success=False,
+                    external_card_id=None,
+                    external_card_url=None,
+                    error_message=f"HTTP {resp.status_code}: {body}",
+                )
+            data = resp.json()
+            cid = str(data.get("id", "")) or external_card_id.strip()
+            url = str(data.get("url") or data.get("shortUrl") or "") or None
+            self._logger.info("kanban.trello.card_updated", card_id=cid)
+            return KanbanProviderCreateResult(success=True, external_card_id=cid, external_card_url=url, error_message=None)
+        except httpx.HTTPError as exc:
+            self._logger.error("kanban.trello.http_error", error=str(exc))
+            return KanbanProviderCreateResult(success=False, external_card_id=None, external_card_url=None, error_message=str(exc))
+
     def healthcheck(self) -> bool:
         if not self._api_key or not self._token:
             return False

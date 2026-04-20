@@ -116,6 +116,9 @@ class KanbanPort(Protocol):
     def create_card(self, draft: KanbanCardDraft) -> KanbanProviderCreateResult:
         ...
 
+    def update_card(self, draft: KanbanCardDraft, *, external_card_id: str) -> KanbanProviderCreateResult:
+        """In-place update of an existing external card/task (safe fields only; provider-dependent)."""
+
     def healthcheck(self) -> bool:
         ...
 

@@ -321,8 +321,13 @@ class KanbanPreviewSummaryDTO:
     provider: KanbanProvider
     approved_ready: int
     would_skip_already_synced: int
+    """Same fingerprint as last successful sync — no external write."""
     would_sync_or_retry: int
+    """Backward compatible: planned creates + planned updates (excludes manual-skip)."""
     sample_task_ids: tuple[int, ...]
+    planned_creates: int = 0
+    planned_updates: int = 0
+    planned_skip_manual_resync: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +335,7 @@ class KanbanSyncBatchResultDTO:
     run_id: str
     found: int
     synced: int
+    updated: int
     skipped: int
     failed: int
     dry_run: bool
@@ -352,3 +358,4 @@ class KanbanStatusSummaryDTO:
     failed: int
     skipped: int
     last_errors: tuple[str, ...]
+    provider_readiness: str | None = None

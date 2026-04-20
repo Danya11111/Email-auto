@@ -55,6 +55,11 @@ class LocalFileKanbanAdapter(KanbanPort):
                 success=False, external_card_id=None, external_card_url=None, error_message=str(exc)
             )
 
+    def update_card(self, draft: KanbanCardDraft, *, external_card_id: str) -> KanbanProviderCreateResult:
+        """Overwrite the same JSON card file (idempotent; external_card_id ignored for path)."""
+        _ = external_card_id
+        return self.create_card(draft)
+
     def healthcheck(self) -> bool:
         try:
             self._root.mkdir(parents=True, exist_ok=True)

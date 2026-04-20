@@ -325,8 +325,10 @@ def kanban_preview_cmd(
     res = kb.preview.execute(provider=prov, limit=limit)
     typer.echo(
         f"provider={res.provider.value} approved_ready={res.approved_ready} "
-        f"would_skip_synced={res.would_skip_already_synced} would_sync={res.would_sync_or_retry} "
-        f"sample_task_ids={list(res.sample_task_ids)}"
+        f"skip_same_fingerprint={res.would_skip_already_synced} "
+        f"planned_create={res.planned_creates} planned_update={res.planned_updates} "
+        f"skip_manual_resync={res.planned_skip_manual_resync} "
+        f"would_write={res.would_sync_or_retry} sample_task_ids={list(res.sample_task_ids)}"
     )
     conn.close()
 
@@ -353,8 +355,9 @@ def kanban_sync_cmd(
         only_task_id=only_task_id,
     )
     typer.echo(
-        f"kanban-sync done: found={res.found} synced={res.synced} skipped={res.skipped} failed={res.failed} "
-        f"dry_run={res.dry_run} dry_run_planned={res.dry_run_planned} run_id={res.run_id}"
+        f"kanban-sync done: found={res.found} synced={res.synced} updated={res.updated} "
+        f"skipped={res.skipped} failed={res.failed} dry_run={res.dry_run} dry_run_planned={res.dry_run_planned} "
+        f"run_id={res.run_id}"
     )
     conn.close()
 
@@ -391,6 +394,8 @@ def kanban_status_cmd(
     typer.echo(
         f"provider={st.provider.value} pending={st.pending} synced={st.synced} failed={st.failed} skipped={st.skipped}"
     )
+    if st.provider_readiness:
+        typer.echo(f"  readiness: {st.provider_readiness}")
     for err in st.last_errors:
         typer.echo(f"  err: {err[:300]}")
     conn.close()

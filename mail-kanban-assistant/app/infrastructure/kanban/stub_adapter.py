@@ -27,5 +27,15 @@ class StubKanbanAdapter(KanbanPort):
             error_message="kanban_provider_stub_does_not_create_cards",
         )
 
+    def update_card(self, draft: KanbanCardDraft, *, external_card_id: str) -> KanbanProviderCreateResult:
+        _ = (draft, external_card_id)
+        self._logger.info("kanban.stub.update_card_noop")
+        return KanbanProviderCreateResult(
+            success=False,
+            external_card_id=None,
+            external_card_url=None,
+            error_message="kanban_provider_stub_does_not_update_cards",
+        )
+
     def healthcheck(self) -> bool:
         return True

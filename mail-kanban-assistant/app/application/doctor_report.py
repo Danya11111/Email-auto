@@ -137,6 +137,36 @@ class DoctorEnvironmentUseCase:
                 )
             else:
                 lines.append(DoctorLineDTO("OK", "Trello mandatory settings appear present (not validating network here)."))
+        elif settings.kanban_provider == KanbanProvider.YOUGILE:
+            missing: list[str] = []
+            if not (settings.yougile_api_key or "").strip():
+                missing.append("YOUGILE_API_KEY")
+            if not (settings.yougile_column_id_todo or "").strip():
+                missing.append("YOUGILE_COLUMN_ID_TODO")
+            if missing:
+                lines.append(
+                    DoctorLineDTO(
+                        "FAIL",
+                        f"YouGile provider selected but missing env/settings: {', '.join(missing)}",
+                    )
+                )
+            else:
+                lines.append(DoctorLineDTO("OK", "YouGile mandatory settings appear present (API key + TODO column)."))
+            if not (settings.yougile_board_id or "").strip():
+                lines.append(DoctorLineDTO("WARN", "YOUGILE_BOARD_ID empty — adapter healthcheck may fail."))
+            if not settings.yougile_enable_update_existing:
+                lines.append(
+                    DoctorLineDTO(
+                        "OK",
+                        "YOUGILE_ENABLE_UPDATE_EXISTING=false (safe default: no silent remote edits after fingerprint changes).",
+                    )
+                )
+            lines.append(
+                DoctorLineDTO(
+                    "OK",
+                    f"YouGile rate target: {int(settings.yougile_requests_per_minute)} req/min (API limit 50/company).",
+                )
+            )
         elif settings.kanban_provider == KanbanProvider.STUB:
             lines.append(DoctorLineDTO("WARN", "Kanban provider is stub — no external/local cards will be created."))
 

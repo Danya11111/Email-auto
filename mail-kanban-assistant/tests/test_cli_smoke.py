@@ -102,6 +102,34 @@ def test_cli_prepare_maildrop_doctor_print_launchd(tmp_path: Path, monkeypatch) 
     assert out_plist.exists()
 
 
+def test_cli_doctor_yougile_missing_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "yg_doc.sqlite3"))
+    monkeypatch.setenv("KANBAN_PROVIDER", "yougile")
+    monkeypatch.delenv("YOUGILE_API_KEY", raising=False)
+    monkeypatch.delenv("YOUGILE_COLUMN_ID_TODO", raising=False)
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["init-db"], env={**os.environ}).exit_code == 0
+    repo_root = Path(__file__).resolve().parents[1]
+    r = runner.invoke(app, ["doctor", "--repo-root", str(repo_root)], env={**os.environ})
+    assert r.exit_code == 0
+    assert "YOUGILE_API_KEY" in r.stdout
+
+
+def test_cli_kanban_yougile_dry_run_does_not_require_live_api(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "yg_cli.sqlite3"))
+    monkeypatch.setenv("KANBAN_PROVIDER", "yougile")
+    monkeypatch.setenv("YOUGILE_API_KEY", "test-key-not-used-on-dry-run")
+    monkeypatch.setenv("YOUGILE_COLUMN_ID_TODO", "00000000-0000-0000-0000-000000000001")
+    monkeypatch.setenv("YOUGILE_BOARD_ID", "00000000-0000-0000-0000-000000000002")
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["init-db"], env={**os.environ}).exit_code == 0
+    r = runner.invoke(app, ["kanban-sync", "--dry-run"], env={**os.environ})
+    assert r.exit_code == 0
+    assert "updated=" in r.stdout
+
+
 def test_cli_kanban_preview_status_dry_run(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "kb_cli.sqlite3"))
     monkeypatch.setenv("KANBAN_ROOT_DIR", str(tmp_path / "kanban_cli"))
@@ -121,6 +149,7 @@ def test_cli_kanban_preview_status_dry_run(tmp_path: Path, monkeypatch) -> None:
     r3 = runner.invoke(app, ["kanban-sync", "--dry-run"], env={**os.environ})
     assert r3.exit_code == 0
     assert "kanban-sync done:" in r3.stdout
+    assert "updated=" in r3.stdout
 
     r4 = runner.invoke(app, ["kanban-export-local"], env={**os.environ})
     assert r4.exit_code == 0
