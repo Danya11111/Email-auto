@@ -13,7 +13,7 @@ This repository is intentionally **not** a toy script: it is a **Clean Architect
 ## Non-goals (MVP)
 
 - No direct parsing of undocumented Apple Mail internal databases.
-- No real Kanban / issue tracker integration (interfaces + stub only).
+- No hosted multi-tenant SaaS; integrations are explicit, local-first adapters.
 - No cloud mail sync.
 - No GUI (CLI-only review workflow).
 
@@ -46,6 +46,7 @@ Details:
 - `docs/adr/0001-initial-architecture.md`
 - `docs/adr/0002-review-queue-and-low-memory-workflow.md`
 - `docs/adr/0003-apple-mail-drop-snapshot-format.md`
+- `docs/adr/0004-kanban-sync-outbox.md`
 
 ## LM Studio setup on a weak Mac (practical)
 
@@ -166,6 +167,29 @@ Write digest to disk and print it:
 mail-assistant build-digest --out ./data/digest.md
 ```
 
+The digest includes a short **Kanban sync** section when the DB has sync state (counts by status, recent errors).
+
+### 7b) Kanban sync (approved tasks only)
+
+After tasks reach **`approved`** via the review queue, you can push them to a Kanban provider in an **idempotent** way:
+
+- **`local_file`** (default): writes `task_<id>.json` under `KANBAN_ROOT_DIR/cards/` and can export `board.md`.
+- **`trello`**: creates cards via the REST API (set `TRELLO_*` in `.env`; see `doctor`).
+- **`stub`**: no external side effects (useful for dry runs / tests).
+
+Commands:
+
+```bash
+mail-assistant kanban-preview
+mail-assistant kanban-sync --dry-run
+mail-assistant kanban-sync
+mail-assistant kanban-status
+mail-assistant kanban-retry-failed
+mail-assistant kanban-export-local
+```
+
+`KANBAN_AUTO_SYNC=false` by default: automatic sync on approve / `run-daily` stays opt-in.
+
 ### 8) One-shot daily pipeline
 
 `run-daily` optionally ingests from paths configured in `.env` (`MAIL_EML_DIR`, `MAIL_MBOX_PATH`, **`MAILDROP_ROOT`**), then runs triage → extract → digest.
@@ -242,11 +266,10 @@ Historical reference template: `app/scheduler/launchd/com.local.mailassistant.pl
 ## Stubs / TODO
 
 - `app/infrastructure/mail/apple_mail_adapter.py`: legacy placeholder reader (kept for older “export to `.eml`” experiments). Prefer **`ingest-apple-mail-drop`** for the supported Apple Mail path.
-- `app/infrastructure/kanban/stub_adapter.py`: Kanban sync is logged-only.
 - Richer review UX (filters, bulk actions), richer digest inputs without bloating prompts.
 
 ## Next iteration (suggested)
 
 - Richer Mail automation templates (bulk selection helpers, safer HTML→text extraction) while keeping the JSON snapshot contract stable.
-- Real Kanban adapter behind `KanbanPort` with explicit rate limits + idempotent external IDs.
+- More Kanban providers behind `KanbanPort` (rate limits, richer field mapping) without changing the sync outbox contract.
 - Optional short LLM “executive headline” separate from deterministic digest sections (still one prompt = one task).

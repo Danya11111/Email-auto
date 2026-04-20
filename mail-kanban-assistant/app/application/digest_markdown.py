@@ -69,6 +69,26 @@ def compose_daily_digest_markdown(*, ctx: DailyDigestContextDTO, pipeline_notes:
             )
     lines.append("")
 
+    lines.append("## Kanban sync")
+    kb = ctx.kanban
+    if kb is None:
+        lines.append("- Kanban digest stats unavailable (no sync repository wired for this run).")
+    else:
+        lines.append(
+            f"- Provider: **{kb.provider}**; auto-sync: **{'on' if kb.auto_sync_enabled else 'off'}**"
+        )
+        lines.append(
+            f"- Approved ready to sync: **{kb.approved_ready_to_sync}**; "
+            f"outbox pending: **{kb.pending_outbox}**; synced records: **{kb.synced}**; failed: **{kb.failed}**"
+        )
+        if kb.recent_errors:
+            lines.append("- Recent sync errors:")
+            for err in kb.recent_errors[:5]:
+                lines.append(f"  - `{err[:200]}`")
+        else:
+            lines.append("- Recent sync errors: none")
+    lines.append("")
+
     lines.append("## Pipeline stats / system notes")
     if not pipeline_notes:
         lines.append("- None")

@@ -14,23 +14,32 @@ from app.application.policies import TaskAutomationPolicy
 from app.application.use_cases import IngestMessagesUseCase
 from app.application.use_cases.prepare_maildrop import PrepareMaildropUseCase
 from app.bootstrap import (
+    build_kanban_wiring,
     build_process_apple_mail_drop_use_case,
     build_wiring,
     init_database,
     run_daily,
 )
 from app.config import AppSettings
+from app.domain.enums import KanbanProvider
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.fs.maildrop_filesystem import OsMaildropFilesystem
 from app.infrastructure.http.http_probe import UrllibHttpProbe
 from app.infrastructure.logging.logger import StructuredLoggerAdapter
 from app.infrastructure.mail.eml_reader import EmlDirectoryReader
 from app.infrastructure.mail.mbox_reader import MboxFileReader
-from app.infrastructure.storage.repositories import SqlitePipelineRunRepository
+from app.infrastructure.storage.repositories import SqlitePipelineRunRepository, SqliteTaskRepository
 from app.infrastructure.storage.sqlite_db import open_connection
+from app.infrastructure.kanban.factory import make_kanban_port
 from app.utils.ids import new_run_id
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+
+
+def _parse_kanban_provider(value: Optional[str], default: KanbanProvider) -> KanbanProvider:
+    if value is None or str(value).strip() == "":
+        return default
+    return KanbanProvider(str(value).strip().lower())
 
 
 @app.callback()
@@ -295,9 +304,111 @@ def doctor_cmd(
     settings = AppSettings()
     rr = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
     wr = wrapper.resolve() if wrapper is not None else (rr / "scripts" / "macos" / "run-mail-assistant-daily.sh")
+    log = StructuredLoggerAdapter()
     uc = DoctorEnvironmentUseCase(http=UrllibHttpProbe())
-    report = uc.execute(settings, repo_root=rr, wrapper_script=wr)
+    report = uc.execute(settings, repo_root=rr, wrapper_script=wr, kanban_port=make_kanban_port(settings, log))
     typer.echo(report.render_text())
+
+
+@app.command("kanban-preview")
+def kanban_preview_cmd(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
+    prov = _parse_kanban_provider(provider, settings.kanban_provider)
+    res = kb.preview.execute(provider=prov, limit=limit)
+    typer.echo(
+        f"provider={res.provider.value} approved_ready={res.approved_ready} "
+        f"would_skip_synced={res.would_skip_already_synced} would_sync={res.would_sync_or_retry} "
+        f"sample_task_ids={list(res.sample_task_ids)}"
+    )
+    conn.close()
+
+
+@app.command("kanban-sync")
+def kanban_sync_cmd(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+    limit: Optional[int] = typer.Option(None, "--limit", min=1, max=500),
+    only_task_id: Optional[int] = typer.Option(None, "--only-task-id"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
+    prov = _parse_kanban_provider(provider, settings.kanban_provider)
+    res = kb.sync.execute(
+        run_id=new_run_id(),
+        provider=prov,
+        dry_run=dry_run,
+        limit=limit,
+        only_task_id=only_task_id,
+    )
+    typer.echo(
+        f"kanban-sync done: found={res.found} synced={res.synced} skipped={res.skipped} failed={res.failed} "
+        f"dry_run={res.dry_run} dry_run_planned={res.dry_run_planned} run_id={res.run_id}"
+    )
+    conn.close()
+
+
+@app.command("kanban-retry-failed")
+def kanban_retry_failed_cmd(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+    limit: Optional[int] = typer.Option(None, "--limit", min=1, max=500),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
+    prov = _parse_kanban_provider(provider, settings.kanban_provider)
+    res = kb.retry.execute(run_id=new_run_id(), provider=prov, limit=limit)
+    typer.echo(f"kanban-retry-failed done: attempted={res.attempted} synced={res.synced} failed={res.failed} run_id={res.run_id}")
+    conn.close()
+
+
+@app.command("kanban-status")
+def kanban_status_cmd(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
+    prov = _parse_kanban_provider(provider, settings.kanban_provider)
+    st = kb.status.execute(provider=prov)
+    typer.echo(
+        f"provider={st.provider.value} pending={st.pending} synced={st.synced} failed={st.failed} skipped={st.skipped}"
+    )
+    for err in st.last_errors:
+        typer.echo(f"  err: {err[:300]}")
+    conn.close()
+
+
+@app.command("kanban-export-local")
+def kanban_export_local_cmd() -> None:
+    settings = AppSettings()
+    if settings.kanban_provider != KanbanProvider.LOCAL_FILE:
+        typer.echo(f"WARN: KANBAN_PROVIDER is {settings.kanban_provider.value}; export still writes under KANBAN_ROOT_DIR.")
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
+    path = kb.export.execute()
+    typer.echo(f"wrote {path}")
+    conn.close()
 
 
 def _default_launchd_log_paths(repo_root: Path) -> tuple[Path, Path]:

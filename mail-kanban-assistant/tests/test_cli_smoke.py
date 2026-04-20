@@ -102,6 +102,31 @@ def test_cli_prepare_maildrop_doctor_print_launchd(tmp_path: Path, monkeypatch) 
     assert out_plist.exists()
 
 
+def test_cli_kanban_preview_status_dry_run(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "kb_cli.sqlite3"))
+    monkeypatch.setenv("KANBAN_ROOT_DIR", str(tmp_path / "kanban_cli"))
+    monkeypatch.setenv("KANBAN_PROVIDER", "local_file")
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["init-db"], env={**os.environ}).exit_code == 0
+
+    r1 = runner.invoke(app, ["kanban-preview"], env={**os.environ})
+    assert r1.exit_code == 0
+    assert "approved_ready=" in r1.stdout
+
+    r2 = runner.invoke(app, ["kanban-status"], env={**os.environ})
+    assert r2.exit_code == 0
+    assert "pending=" in r2.stdout
+
+    r3 = runner.invoke(app, ["kanban-sync", "--dry-run"], env={**os.environ})
+    assert r3.exit_code == 0
+    assert "kanban-sync done:" in r3.stdout
+
+    r4 = runner.invoke(app, ["kanban-export-local"], env={**os.environ})
+    assert r4.exit_code == 0
+    assert "wrote" in r4.stdout
+
+
 def test_cli_ingest_apple_mail_drop(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "m.sqlite3"))
     maildrop = tmp_path / "maildrop"

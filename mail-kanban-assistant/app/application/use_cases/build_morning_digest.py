@@ -6,7 +6,8 @@ from datetime import timedelta
 
 from app.application.digest_markdown import compose_daily_digest_markdown
 from app.application.dtos import DigestBuildResultDTO
-from app.application.ports import ClockPort, DigestContextPort, LoggerPort, MorningDigestRepositoryPort
+from app.application.ports import ClockPort, DigestContextPort, KanbanSyncRepositoryPort, LoggerPort, MorningDigestRepositoryPort
+from app.domain.enums import KanbanProvider
 from app.domain.models import MorningDigest
 
 
@@ -18,6 +19,9 @@ class BuildMorningDigestUseCase:
     logger: LoggerPort
     lookback_hours: int
     digest_max_messages: int
+    kanban_sync: KanbanSyncRepositoryPort | None = None
+    kanban_provider: KanbanProvider = KanbanProvider.LOCAL_FILE
+    kanban_auto_sync: bool = False
 
     def execute(
         self,
@@ -36,6 +40,12 @@ class BuildMorningDigestUseCase:
             window_end=end,
             max_messages=self.digest_max_messages,
         )
+        if self.kanban_sync is not None:
+            kb = self.kanban_sync.load_kanban_digest_section(
+                provider=self.kanban_provider,
+                auto_sync_enabled=self.kanban_auto_sync,
+            )
+            ctx = ctx.model_copy(update={"kanban": kb})
         markdown = compose_daily_digest_markdown(ctx=ctx, pipeline_notes=pipeline_stats or {})
         digest = MorningDigest(window_start=start, window_end=end, markdown=markdown)
         digest_id = self.digests.save_digest(pipeline_run_id=pipeline_run_db_id, digest=digest)

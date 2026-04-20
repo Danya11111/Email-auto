@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
-from app.application.ports import HttpProbePort
+from app.application.ports import HttpProbePort, KanbanPort
 from app.config import AppSettings
+from app.domain.enums import KanbanProvider
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,7 @@ class DoctorEnvironmentUseCase:
         *,
         repo_root: Path,
         wrapper_script: Path | None,
+        kanban_port: KanbanPort | None = None,
     ) -> DoctorReportDTO:
         lines: list[DoctorLineDTO] = []
 
@@ -106,5 +108,45 @@ class DoctorEnvironmentUseCase:
             lines.append(DoctorLineDTO("OK", f"Example plist present: {plist_hint}"))
         else:
             lines.append(DoctorLineDTO("WARN", f"Example plist missing: {plist_hint}"))
+
+        lines.append(DoctorLineDTO("OK", f"Kanban provider: {settings.kanban_provider.value}"))
+        lines.append(DoctorLineDTO("OK", f"Kanban auto-sync: {'enabled' if settings.kanban_auto_sync else 'disabled'}"))
+        if settings.kanban_provider == KanbanProvider.LOCAL_FILE:
+            kr = settings.kanban_root_dir.resolve()
+            try:
+                kr.mkdir(parents=True, exist_ok=True)
+                probe = kr / ".doctor_probe"
+                probe.write_text("ok", encoding="utf-8")
+                lines.append(DoctorLineDTO("OK", f"Kanban local root writable: {kr}"))
+            except OSError as exc:
+                lines.append(DoctorLineDTO("FAIL", f"Kanban local root not writable ({kr}): {exc}"))
+        elif settings.kanban_provider == KanbanProvider.TRELLO:
+            missing: list[str] = []
+            if not (settings.trello_api_key or "").strip():
+                missing.append("TRELLO_API_KEY")
+            if not (settings.trello_token or "").strip():
+                missing.append("TRELLO_TOKEN")
+            if not (settings.trello_list_id_todo or "").strip():
+                missing.append("TRELLO_LIST_ID_TODO")
+            if missing:
+                lines.append(
+                    DoctorLineDTO(
+                        "FAIL",
+                        f"Trello provider selected but missing env/settings: {', '.join(missing)}",
+                    )
+                )
+            else:
+                lines.append(DoctorLineDTO("OK", "Trello mandatory settings appear present (not validating network here)."))
+        elif settings.kanban_provider == KanbanProvider.STUB:
+            lines.append(DoctorLineDTO("WARN", "Kanban provider is stub — no external/local cards will be created."))
+
+        if kanban_port is not None:
+            try:
+                ok = kanban_port.healthcheck()
+                lines.append(
+                    DoctorLineDTO("OK" if ok else "WARN", f"Kanban adapter healthcheck: {'ok' if ok else 'failed'}")
+                )
+            except Exception as exc:  # noqa: BLE001
+                lines.append(DoctorLineDTO("WARN", f"Kanban adapter healthcheck raised: {type(exc).__name__}: {exc}"))
 
         return DoctorReportDTO(lines=tuple(lines))

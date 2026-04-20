@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.application.ports import LoggerPort, MessageRepositoryPort, ReviewRepositoryPort, TaskRepositoryPort, TriageResultRepositoryPort
@@ -14,6 +15,7 @@ class ApproveReviewItemUseCase:
     triage: TriageResultRepositoryPort
     tasks: TaskRepositoryPort
     logger: LoggerPort
+    on_task_approved: Callable[[int], None] | None = None
 
     def execute(self, *, review_id: int, decided_by: str, note: str | None) -> None:
         item = self.reviews.get(review_id)
@@ -35,3 +37,9 @@ class ApproveReviewItemUseCase:
             task_id=item.related_task_id,
             decided_by=decided_by,
         )
+        if (
+            item.review_kind == ReviewKind.TASK
+            and item.related_task_id is not None
+            and self.on_task_approved is not None
+        ):
+            self.on_task_approved(item.related_task_id)

@@ -12,14 +12,15 @@ from app.application.dtos import (
     DigestReviewSnapshotDTO,
     DigestTaskSnapshotDTO,
     IncomingMessageDTO,
+    PersistedExtractedTaskDTO,
     PersistedMessageDTO,
     ReviewEnqueueCommandDTO,
     ReviewListItemDTO,
     SavedCandidateTaskDTO,
+    TaskKanbanSourceContextDTO,
 )
 from app.application.ports import ClockPort
 from app.domain.enums import (
-    IngestedArtifactStatus,
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
@@ -294,6 +295,63 @@ class SqliteTaskRepository:
             (message_id, TaskStatus.CANDIDATE.value),
         ).fetchone()
         return row is not None
+
+    def _row_to_kanban_context(self, row: sqlite3.Row) -> TaskKanbanSourceContextDTO:
+        task = PersistedExtractedTaskDTO(
+            id=int(row["id"]),
+            message_id=int(row["message_id"]),
+            title=str(row["title"]),
+            description=row["description"],
+            due_at=_parse_dt(row["due_at"]),
+            confidence=float(row["confidence"]),
+            status=TaskStatus(str(row["status"])),
+            dedupe_key=str(row["dedupe_key"]),
+        )
+        triage_reply = ReplyRequirement(str(row["tr_reply"])) if row["tr_reply"] is not None else None
+        triage_conf = float(row["tr_conf"]) if row["tr_conf"] is not None else None
+        triage_imp = MessageImportance(str(row["tr_imp"])) if row["tr_imp"] is not None else None
+        return TaskKanbanSourceContextDTO(
+            task=task,
+            message_subject=row["subject"],
+            message_sender=row["sender"],
+            triage_summary=row["tr_summary"],
+            triage_reply_requirement=triage_reply,
+            triage_confidence=triage_conf,
+            triage_importance=triage_imp,
+        )
+
+    def get_task_kanban_context(self, task_id: int) -> TaskKanbanSourceContextDTO | None:
+        row = self._conn.execute(
+            """
+            SELECT et.*, m.subject, m.sender, t.reply_requirement AS tr_reply,
+                   t.summary AS tr_summary, t.confidence AS tr_conf, t.importance AS tr_imp
+            FROM extracted_tasks et
+            JOIN messages m ON m.id = et.message_id
+            LEFT JOIN triage_results t ON t.message_id = m.id
+            WHERE et.id = ?
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_kanban_context(row)
+
+    def list_approved_tasks_for_kanban(self, limit: int) -> Sequence[TaskKanbanSourceContextDTO]:
+        rows = self._conn.execute(
+            """
+            SELECT et.*, m.subject, m.sender, t.reply_requirement AS tr_reply,
+                   t.summary AS tr_summary, t.confidence AS tr_conf, t.importance AS tr_imp
+            FROM extracted_tasks et
+            JOIN messages m ON m.id = et.message_id
+            LEFT JOIN triage_results t ON t.message_id = m.id
+            WHERE et.status = ?
+            ORDER BY et.id ASC
+            LIMIT ?
+            """,
+            (TaskStatus.APPROVED.value, limit),
+        ).fetchall()
+        return tuple(self._row_to_kanban_context(r) for r in rows)
 
 
 class SqliteMorningDigestRepository:

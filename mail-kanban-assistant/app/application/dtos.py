@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 from app.domain.enums import (
     IngestedArtifactStatus,
+    KanbanProvider,
+    KanbanSyncStatus,
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
@@ -120,6 +122,20 @@ class DailyDigestStatsDTO(BaseModel):
     candidate_tasks: int
 
 
+class KanbanDigestSectionDTO(BaseModel):
+    """Compact Kanban sync snapshot for deterministic digest rendering."""
+
+    model_config = {"frozen": True}
+
+    provider: str
+    auto_sync_enabled: bool
+    approved_ready_to_sync: int
+    pending_outbox: int
+    synced: int
+    failed: int
+    recent_errors: tuple[str, ...] = Field(default_factory=tuple)
+
+
 class DailyDigestContextDTO(BaseModel):
     model_config = {"frozen": True}
 
@@ -129,6 +145,7 @@ class DailyDigestContextDTO(BaseModel):
     messages: tuple[DigestMessageSnapshotDTO, ...]
     candidate_tasks: tuple[DigestTaskSnapshotDTO, ...]
     pending_reviews: tuple[DigestReviewSnapshotDTO, ...]
+    kanban: KanbanDigestSectionDTO | None = None
 
 
 class ReviewEnqueueCommandDTO(BaseModel):
@@ -252,3 +269,86 @@ class AppleMailDropIngestSummaryDTO:
     failed: int
     moved_processed: int
     moved_failed: int
+
+
+class PersistedExtractedTaskDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    id: int
+    message_id: int
+    title: str
+    description: str | None
+    due_at: datetime | None
+    confidence: float
+    status: TaskStatus
+    dedupe_key: str
+
+
+class TaskKanbanSourceContextDTO(BaseModel):
+    """Inputs required to build a deterministic Kanban card draft."""
+
+    model_config = {"frozen": True}
+
+    task: PersistedExtractedTaskDTO
+    message_subject: str | None
+    message_sender: str | None
+    triage_summary: str | None
+    triage_reply_requirement: ReplyRequirement | None
+    triage_confidence: float | None
+    triage_importance: MessageImportance | None = None
+
+
+class KanbanSyncRecordRowDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    id: int
+    task_id: int
+    provider: KanbanProvider
+    sync_status: KanbanSyncStatus
+    external_card_id: str | None
+    external_card_url: str | None
+    card_fingerprint: str
+    payload_json: str
+    created_at: datetime
+    synced_at: datetime | None
+    last_attempt_at: datetime | None
+    last_error: str | None
+    retry_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanPreviewSummaryDTO:
+    provider: KanbanProvider
+    approved_ready: int
+    would_skip_already_synced: int
+    would_sync_or_retry: int
+    sample_task_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanSyncBatchResultDTO:
+    run_id: str
+    found: int
+    synced: int
+    skipped: int
+    failed: int
+    dry_run: bool
+    dry_run_planned: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanRetryBatchResultDTO:
+    run_id: str
+    attempted: int
+    synced: int
+    failed: int
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanStatusSummaryDTO:
+    provider: KanbanProvider
+    pending: int
+    synced: int
+    failed: int
+    skipped: int
+    last_errors: tuple[str, ...]

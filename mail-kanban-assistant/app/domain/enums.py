@@ -68,3 +68,30 @@ class ReviewStatus(StrEnum):
 class ReviewKind(StrEnum):
     TRIAGE = "triage"
     TASK = "task"
+
+
+class KanbanProvider(StrEnum):
+    STUB = "stub"
+    LOCAL_FILE = "local_file"
+    TRELLO = "trello"
+
+
+class KanbanSyncStatus(StrEnum):
+    PENDING = "pending"
+    SYNCED = "synced"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class KanbanCardStatus(StrEnum):
+    TODO = "todo"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    BLOCKED = "blocked"
+
+
+class KanbanPriority(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"

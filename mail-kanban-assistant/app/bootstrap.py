@@ -13,6 +13,13 @@ from app.application.use_cases import (
     IngestMessagesUseCase,
     TriageMessagesUseCase,
 )
+from app.application.use_cases.kanban_sync import (
+    ExportLocalKanbanBoardUseCase,
+    ListKanbanSyncStatusUseCase,
+    PreviewKanbanSyncCandidatesUseCase,
+    RetryFailedKanbanSyncUseCase,
+    SyncApprovedTasksToKanbanUseCase,
+)
 from app.application.use_cases.process_apple_mail_drop import ProcessAppleMailDropUseCase
 from app.application.use_cases.approve_review_item import ApproveReviewItemUseCase
 from app.application.use_cases.enqueue_review_items import EnqueueReviewItemsUseCase
@@ -20,7 +27,8 @@ from app.application.use_cases.list_pending_reviews import ListPendingReviewsUse
 from app.application.use_cases.reject_review_item import RejectReviewItemUseCase
 from app.config import AppSettings
 from app.infrastructure.clock import SystemClock
-from app.infrastructure.kanban.stub_adapter import StubKanbanAdapter
+from app.application.ports import KanbanPort
+from app.infrastructure.kanban.factory import make_kanban_port
 from app.infrastructure.llm.client import LmStudioStructuredClient
 from app.infrastructure.logging.logger import StructuredLoggerAdapter
 from app.infrastructure.mail.eml_reader import EmlDirectoryReader
@@ -37,6 +45,7 @@ from app.infrastructure.storage.repositories import (
     SqliteTriageRepository,
 )
 from app.infrastructure.storage.sqlite_ingested_artifact_repository import SqliteIngestedArtifactRepository
+from app.infrastructure.storage.sqlite_kanban_sync_repository import SqliteKanbanSyncRepository
 from app.infrastructure.storage.sqlite_db import initialize_database, open_connection
 from app.utils.ids import new_run_id
 
@@ -68,6 +77,51 @@ def make_lm_studio_client(settings: AppSettings, logger: StructuredLoggerAdapter
         max_output_tokens=int(settings.llm_max_output_tokens),
         llm_text_policy=_llm_text_policy(settings),
         logger=logger,
+    )
+
+
+class KanbanCliWiring(NamedTuple):
+    kanban_port: KanbanPort
+    preview: PreviewKanbanSyncCandidatesUseCase
+    sync: SyncApprovedTasksToKanbanUseCase
+    retry: RetryFailedKanbanSyncUseCase
+    status: ListKanbanSyncStatusUseCase
+    export: ExportLocalKanbanBoardUseCase
+
+
+def build_kanban_wiring(
+    conn,
+    clock: SystemClock,
+    logger: StructuredLoggerAdapter,
+    settings: AppSettings,
+    tasks_repo: SqliteTaskRepository,
+) -> KanbanCliWiring:
+    sync_repo = SqliteKanbanSyncRepository(conn, clock)
+    kanban = make_kanban_port(settings, logger)
+    preview = PreviewKanbanSyncCandidatesUseCase(tasks=tasks_repo, sync=sync_repo, logger=logger, settings=settings)
+    sync_uc = SyncApprovedTasksToKanbanUseCase(
+        tasks=tasks_repo,
+        sync=sync_repo,
+        kanban=kanban,
+        logger=logger,
+        settings=settings,
+    )
+    retry_uc = RetryFailedKanbanSyncUseCase(
+        tasks=tasks_repo,
+        sync=sync_repo,
+        kanban=kanban,
+        logger=logger,
+        settings=settings,
+    )
+    status_uc = ListKanbanSyncStatusUseCase(sync=sync_repo, settings=settings)
+    export_uc = ExportLocalKanbanBoardUseCase(settings=settings, logger=logger)
+    return KanbanCliWiring(
+        kanban_port=kanban,
+        preview=preview,
+        sync=sync_uc,
+        retry=retry_uc,
+        status=status_uc,
+        export=export_uc,
     )
 
 
@@ -116,6 +170,7 @@ def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, sett
     pipeline = SqlitePipelineRunRepository(conn, clock)
     reviews = SqliteReviewRepository(conn, clock)
     digest_ctx = SqliteDigestContextRepository(conn)
+    kanban_sync_repo = SqliteKanbanSyncRepository(conn, clock)
 
     enqueue = EnqueueReviewItemsUseCase(reviews=reviews, logger=logger)
     triage_uc = TriageMessagesUseCase(
@@ -126,7 +181,7 @@ def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, sett
         enqueue_reviews=enqueue,
         review_threshold=float(settings.review_confidence_threshold),
     )
-    kanban = StubKanbanAdapter(logger)
+    kanban = make_kanban_port(settings, logger)
     extract_uc = ExtractTasksUseCase(
         messages=messages,
         triage_repo=triage_repo,
@@ -144,15 +199,30 @@ def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, sett
         logger=logger,
         lookback_hours=int(settings.digest_lookback_hours),
         digest_max_messages=int(settings.digest_max_messages),
+        kanban_sync=kanban_sync_repo,
+        kanban_provider=settings.kanban_provider,
+        kanban_auto_sync=settings.kanban_auto_sync,
     )
 
     list_reviews_uc = ListPendingReviewsUseCase(reviews=reviews)
+    kb_wiring = build_kanban_wiring(conn, clock, logger, settings, tasks_repo)
+
+    def _on_task_approved(task_id: int) -> None:
+        kb_wiring.sync.execute(
+            run_id=new_run_id(),
+            provider=settings.kanban_provider,
+            dry_run=False,
+            limit=max(10, int(settings.kanban_sync_batch_size)),
+            only_task_id=task_id,
+        )
+
     approve_review_uc = ApproveReviewItemUseCase(
         reviews=reviews,
         messages=messages,
         triage=triage_repo,
         tasks=tasks_repo,
         logger=logger,
+        on_task_approved=_on_task_approved if settings.kanban_auto_sync else None,
     )
     reject_review_uc = RejectReviewItemUseCase(
         reviews=reviews,
@@ -192,6 +262,9 @@ def format_run_daily_stdout_summary(
     triage: object,
     extract: object,
     digest_id: int,
+    kanban_synced: int | None = None,
+    kanban_skipped: int | None = None,
+    kanban_failed: int | None = None,
 ) -> str:
     lines = [
         f"run_id={run_id}",
@@ -209,6 +282,12 @@ def format_run_daily_stdout_summary(
         f"extract.reviews_enqueued={getattr(extract, 'reviews_enqueued')}",
         f"digest.digest_id={digest_id}",
     ]
+    if kanban_synced is not None:
+        lines.append(f"kanban.synced={kanban_synced}")
+    if kanban_skipped is not None:
+        lines.append(f"kanban.skipped={kanban_skipped}")
+    if kanban_failed is not None:
+        lines.append(f"kanban.failed={kanban_failed}")
     return "\n".join(lines) + "\n"
 
 
@@ -269,6 +348,29 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
             batch_limit=int(settings.task_extraction_batch_size),
         )
 
+        kanban_synced: int | None = None
+        kanban_skipped: int | None = None
+        kanban_failed: int | None = None
+        if settings.kanban_auto_sync:
+            kb_sync_run = SqliteKanbanSyncRepository(conn, clock)
+            ksync = SyncApprovedTasksToKanbanUseCase(
+                tasks=w.tasks_repo,
+                sync=kb_sync_run,
+                kanban=make_kanban_port(settings, logger),
+                logger=logger,
+                settings=settings,
+            )
+            kres = ksync.execute(
+                run_id=f"{run_id}:kanban-auto",
+                provider=settings.kanban_provider,
+                dry_run=False,
+                limit=int(settings.kanban_sync_batch_size),
+                only_task_id=None,
+            )
+            kanban_synced = kres.synced
+            kanban_skipped = kres.skipped
+            kanban_failed = kres.failed
+
         pipeline_stats: dict[str, object] = {
             "ingest.inserted_total": inserted_total,
             "ingest.duplicates_total": duplicates_total,
@@ -282,6 +384,10 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
             "extract.failures": extract_res.failures,
             "extract.reviews_enqueued": extract_res.reviews_enqueued,
         }
+        if kanban_synced is not None:
+            pipeline_stats["kanban.synced"] = kanban_synced
+            pipeline_stats["kanban.skipped"] = kanban_skipped or 0
+            pipeline_stats["kanban.failed"] = kanban_failed or 0
 
         digest_res = w.digest_uc.execute(
             run_id=run_id,
@@ -316,6 +422,9 @@ def run_daily(*, settings: AppSettings, digest_output: Path | None = None) -> Ru
             triage=triage_res,
             extract=extract_res,
             digest_id=digest_res.digest_id,
+            kanban_synced=kanban_synced,
+            kanban_skipped=kanban_skipped,
+            kanban_failed=kanban_failed,
         )
 
         return RunDailyResultDTO(

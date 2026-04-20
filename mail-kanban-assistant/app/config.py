@@ -5,7 +5,7 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.domain.enums import MessageBodyTruncateStrategy
+from app.domain.enums import KanbanCardStatus, KanbanProvider, MessageBodyTruncateStrategy
 
 
 class AppSettings(BaseSettings):
@@ -50,6 +50,25 @@ class AppSettings(BaseSettings):
 
     launchd_label: str = Field(default="com.local.mailassistant", validation_alias="LAUNCHD_LABEL")
 
+    kanban_provider: KanbanProvider = Field(default=KanbanProvider.LOCAL_FILE, validation_alias="KANBAN_PROVIDER")
+    kanban_auto_sync: bool = Field(default=False, validation_alias="KANBAN_AUTO_SYNC")
+    kanban_root_dir: Path = Field(default=Path("./data/kanban/local_board"), validation_alias="KANBAN_ROOT_DIR")
+    kanban_default_status: KanbanCardStatus = Field(default=KanbanCardStatus.TODO, validation_alias="KANBAN_DEFAULT_STATUS")
+    kanban_sync_batch_size: int = Field(default=50, validation_alias="KANBAN_SYNC_BATCH_SIZE")
+    kanban_retry_limit: int = Field(default=5, validation_alias="KANBAN_RETRY_LIMIT")
+    kanban_include_review_metadata: bool = Field(default=True, validation_alias="KANBAN_INCLUDE_REVIEW_METADATA")
+    kanban_include_message_metadata: bool = Field(default=True, validation_alias="KANBAN_INCLUDE_MESSAGE_METADATA")
+    kanban_max_title_chars: int = Field(default=120, validation_alias="KANBAN_MAX_TITLE_CHARS")
+    kanban_max_desc_chars: int = Field(default=4000, validation_alias="KANBAN_MAX_DESC_CHARS")
+    kanban_http_timeout_seconds: float = Field(default=25.0, validation_alias="KANBAN_HTTP_TIMEOUT_SECONDS")
+
+    trello_api_key: str = Field(default="", validation_alias="TRELLO_API_KEY")
+    trello_token: str = Field(default="", validation_alias="TRELLO_TOKEN")
+    trello_board_id: str = Field(default="", validation_alias="TRELLO_BOARD_ID")
+    trello_list_id_todo: str = Field(default="", validation_alias="TRELLO_LIST_ID_TODO")
+    trello_list_id_done: str = Field(default="", validation_alias="TRELLO_LIST_ID_DONE")
+    trello_list_id_blocked: str = Field(default="", validation_alias="TRELLO_LIST_ID_BLOCKED")
+
     @field_validator("mail_eml_dir", "mail_mbox_path", mode="before")
     @classmethod
     def _empty_paths_to_none(cls, value: object) -> object:
@@ -69,6 +88,20 @@ class AppSettings(BaseSettings):
     @field_validator("message_body_truncate_strategy", mode="before")
     @classmethod
     def _normalize_truncate_strategy(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("kanban_provider", mode="before")
+    @classmethod
+    def _normalize_kanban_provider(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("kanban_default_status", mode="before")
+    @classmethod
+    def _normalize_kanban_default_status(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().lower()
         return value

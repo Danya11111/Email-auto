@@ -121,3 +121,24 @@ CREATE INDEX IF NOT EXISTS idx_ingested_artifacts_snapshot_id ON ingested_artifa
 CREATE UNIQUE INDEX IF NOT EXISTS ux_ingested_artifacts_snapshot_id
 ON ingested_artifacts(snapshot_id)
 WHERE snapshot_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS kanban_sync_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  sync_status TEXT NOT NULL,
+  external_card_id TEXT,
+  external_card_url TEXT,
+  card_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  synced_at TEXT,
+  last_attempt_at TEXT,
+  last_error TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(task_id) REFERENCES extracted_tasks(id) ON DELETE CASCADE,
+  UNIQUE(task_id, provider)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kanban_sync_status ON kanban_sync_records(sync_status);
+CREATE INDEX IF NOT EXISTS idx_kanban_sync_provider ON kanban_sync_records(provider);

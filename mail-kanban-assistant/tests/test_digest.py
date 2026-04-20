@@ -16,6 +16,7 @@ from app.infrastructure.storage.repositories import (
     SqlitePipelineRunRepository,
     SqliteTriageRepository,
 )
+from app.infrastructure.storage.sqlite_kanban_sync_repository import SqliteKanbanSyncRepository
 from app.infrastructure.storage.sqlite_db import initialize_database, open_connection
 from app.domain.models import TriageResult
 from tests.fakes import FixedClock, ListIncomingReader, NullLogger
@@ -80,6 +81,7 @@ def test_build_digest_persists_and_contains_sections(conn) -> None:
     )
     messages.update_processing_status(mid, MessageProcessingStatus.TRIAGED)
 
+    kb_sync = SqliteKanbanSyncRepository(conn, clock)
     uc = BuildMorningDigestUseCase(
         digest_context=digest_ctx,
         digests=digests,
@@ -87,9 +89,12 @@ def test_build_digest_persists_and_contains_sections(conn) -> None:
         logger=logger,
         lookback_hours=24,
         digest_max_messages=30,
+        kanban_sync=kb_sync,
+        kanban_auto_sync=False,
     )
 
     res = uc.execute(run_id="digest-run", pipeline_run_db_id=None, pipeline_stats={"note": "test"})
     assert "Executive summary" in res.markdown
     assert "Critical / High priority messages" in res.markdown
+    assert "## Kanban sync" in res.markdown
     assert "Pipeline stats / system notes" in res.markdown

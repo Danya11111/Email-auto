@@ -9,15 +9,19 @@ from app.application.dtos import (
     DigestLLMResponseDTO,
     IngestedArtifactRecordDTO,
     IncomingMessageDTO,
+    KanbanDigestSectionDTO,
+    KanbanStatusSummaryDTO,
+    KanbanSyncRecordRowDTO,
     PersistedMessageDTO,
     ReviewEnqueueCommandDTO,
     ReviewListItemDTO,
     SavedCandidateTaskDTO,
     TaskExtractionItemDTO,
+    TaskKanbanSourceContextDTO,
     TriageLLMResponseDTO,
 )
-from app.domain.enums import MessageProcessingStatus, ReviewKind, TaskStatus
-from app.domain.models import ExtractedTask, MorningDigest, TriageResult
+from app.domain.enums import KanbanProvider, MessageProcessingStatus, ReviewKind, TaskStatus
+from app.domain.models import ExtractedTask, KanbanCardDraft, KanbanProviderCreateResult, MorningDigest, TriageResult
 
 
 class MessageReaderPort(Protocol):
@@ -96,9 +100,68 @@ class TaskRepositoryPort(Protocol):
     def message_has_candidate_tasks(self, message_id: int) -> bool:
         ...
 
+    def get_task_kanban_context(self, task_id: int) -> TaskKanbanSourceContextDTO | None:
+        ...
+
+    def list_approved_tasks_for_kanban(self, limit: int) -> Sequence[TaskKanbanSourceContextDTO]:
+        ...
+
 
 class KanbanPort(Protocol):
+    """Creates external Kanban cards. Legacy `create_task_card` is extraction-time hook (gated by policy)."""
+
     def create_task_card(self, task: ExtractedTask, message: PersistedMessageDTO) -> str | None:
+        ...
+
+    def create_card(self, draft: KanbanCardDraft) -> KanbanProviderCreateResult:
+        ...
+
+    def healthcheck(self) -> bool:
+        ...
+
+
+class KanbanSyncRepositoryPort(Protocol):
+    def get_sync_record_for_task(self, task_id: int, provider: KanbanProvider) -> KanbanSyncRecordRowDTO | None:
+        ...
+
+    def upsert_pending_sync_record(
+        self, *, task_id: int, provider: KanbanProvider, fingerprint: str, payload_json: str
+    ) -> int:
+        ...
+
+    def mark_sync_success(
+        self,
+        *,
+        record_id: int,
+        fingerprint: str,
+        external_card_id: str | None,
+        external_card_url: str | None,
+    ) -> None:
+        ...
+
+    def mark_sync_failed(self, *, record_id: int, error: str) -> None:
+        ...
+
+    def mark_sync_skipped(self, *, record_id: int, reason: str) -> None:
+        ...
+
+    def list_pending_sync_records(self, provider: KanbanProvider, limit: int) -> Sequence[KanbanSyncRecordRowDTO]:
+        ...
+
+    def list_failed_sync_records(
+        self, provider: KanbanProvider, *, limit: int, max_retry: int
+    ) -> Sequence[KanbanSyncRecordRowDTO]:
+        ...
+
+    def maybe_skip_if_already_synced_same_fingerprint(
+        self, *, task_id: int, provider: KanbanProvider, fingerprint: str
+    ) -> bool:
+        ...
+
+    def load_kanban_digest_section(self, *, provider: KanbanProvider, auto_sync_enabled: bool) -> KanbanDigestSectionDTO:
+        ...
+
+    def load_status_summary(self, provider: KanbanProvider) -> KanbanStatusSummaryDTO:
         ...
 
 

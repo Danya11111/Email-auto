@@ -15,3 +15,5 @@ mail_kanban_assistant.egg-info/
 data/*.db
 data/*.sqlite
 !data/.gitkeep
+# Local Kanban board output (KANBAN_ROOT_DIR default)
+data/kanban/

@@ -5,6 +5,10 @@ from datetime import datetime
 from typing import NewType
 
 from app.domain.enums import (
+    KanbanCardStatus,
+    KanbanPriority,
+    KanbanProvider,
+    KanbanSyncStatus,
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
@@ -61,6 +65,45 @@ class MorningDigest:
     window_start: datetime
     window_end: datetime
     markdown: str
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanCardDraft:
+    """Provider-agnostic card content produced from an approved task (domain contract)."""
+
+    internal_task_id: int
+    source_message_id: int
+    title: str
+    description: str
+    due_at: datetime | None
+    priority: KanbanPriority
+    card_status: KanbanCardStatus
+    labels: tuple[str, ...]
+    dedupe_marker: str
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanSyncRecord:
+    """Logical sync state for a task at a provider (no persistence id — see application DTO for rows)."""
+
+    task_id: int
+    provider: KanbanProvider
+    sync_status: KanbanSyncStatus
+    external_card_id: str | None
+    external_card_url: str | None
+    card_fingerprint: str
+    retry_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class KanbanProviderCreateResult:
+    """Result of a single provider create_card attempt (domain boundary object)."""
+
+    success: bool
+    external_card_id: str | None
+    external_card_url: str | None
+    error_message: str | None
 
 
 @dataclass(frozen=True, slots=True)
