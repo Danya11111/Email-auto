@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS kanban_sync_records (
   last_attempt_at TEXT,
   last_error TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
+  last_outbound_action TEXT,
+  last_operation_note TEXT,
+  previous_fingerprint TEXT,
+  previous_external_card_url TEXT,
+  record_updated_at TEXT,
   FOREIGN KEY(task_id) REFERENCES extracted_tasks(id) ON DELETE CASCADE,
   UNIQUE(task_id, provider)
 );

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.application.ports import KanbanPort, LoggerPort
+from app.application.yougile_kanban_policies import pick_yougile_column_for_draft
 from app.config import AppSettings
 from app.domain.enums import KanbanProvider
 from app.infrastructure.kanban.local_file_adapter import LocalFileKanbanAdapter
@@ -22,6 +23,13 @@ def make_kanban_port(settings: AppSettings, logger: LoggerPort) -> KanbanPort:
             timeout_seconds=float(settings.kanban_http_timeout_seconds),
         )
     if provider == KanbanProvider.YOUGILE:
+
+        def _column_id_for_draft(draft) -> str:  # noqa: ANN001
+            pick = pick_yougile_column_for_draft(settings, draft)
+            for w in pick.warnings:
+                logger.warning("kanban.yougile.column_policy", warning=w)
+            return pick.column_id
+
         return YougileKanbanAdapter(
             api_v2_root=yougile_api_v2_root(settings.yougile_base_url),
             api_key=settings.yougile_api_key,
@@ -29,6 +37,7 @@ def make_kanban_port(settings: AppSettings, logger: LoggerPort) -> KanbanPort:
             column_id_todo=settings.yougile_column_id_todo,
             column_id_done=settings.yougile_column_id_done,
             column_id_blocked=settings.yougile_column_id_blocked,
+            column_id_for_draft=_column_id_for_draft,
             timeout_seconds=float(settings.yougile_request_timeout_seconds),
             requests_per_minute=int(settings.yougile_requests_per_minute),
             max_description_chars=int(settings.yougile_max_description_chars),

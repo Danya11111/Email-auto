@@ -87,6 +87,11 @@ class AppSettings(BaseSettings):
     yougile_priority_state_medium: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_MEDIUM")
     yougile_priority_state_high: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_HIGH")
     yougile_priority_state_critical: str = Field(default="", validation_alias="YOUGILE_PRIORITY_STATE_CRITICAL")
+    yougile_default_assignee_external_id: str = Field(
+        default="",
+        validation_alias="YOUGILE_DEFAULT_ASSIGNEE_EXTERNAL_ID",
+        description="Scaffold: future YouGile assignee user id; not sent on API in MVP.",
+    )
 
     @field_validator("mail_eml_dir", "mail_mbox_path", mode="before")
     @classmethod
@@ -154,6 +159,7 @@ class AppSettings(BaseSettings):
         "yougile_priority_state_medium",
         "yougile_priority_state_high",
         "yougile_priority_state_critical",
+        "yougile_default_assignee_external_id",
         mode="before",
     )
     @classmethod

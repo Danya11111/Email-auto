@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -10,7 +11,6 @@ import httpx
 from app.application.dtos import PersistedMessageDTO
 from app.application.ports import KanbanPort, LoggerPort
 from app.application.yougile_errors import format_yougile_provider_error, format_yougile_transport_error
-from app.domain.enums import KanbanCardStatus
 from app.domain.models import ExtractedTask, KanbanCardDraft, KanbanProviderCreateResult
 
 
@@ -63,6 +63,7 @@ class YougileKanbanAdapter(KanbanPort):
         column_id_todo: str,
         column_id_done: str,
         column_id_blocked: str,
+        column_id_for_draft: Callable[[KanbanCardDraft], str] | None,
         timeout_seconds: float,
         requests_per_minute: int,
         max_description_chars: int,
@@ -78,6 +79,7 @@ class YougileKanbanAdapter(KanbanPort):
         self._col_todo = column_id_todo.strip()
         self._col_done = column_id_done.strip()
         self._col_blocked = column_id_blocked.strip()
+        self._column_id_for_draft = column_id_for_draft
         self._timeout = float(timeout_seconds)
         self._max_desc = max(256, int(max_description_chars))
         self._include_fp = include_internal_ids
@@ -108,10 +110,12 @@ class YougileKanbanAdapter(KanbanPort):
             return "Missing YOUGILE_COLUMN_ID_TODO"
         return None
 
-    def _column_for_status(self, status: KanbanCardStatus) -> str:
-        if status == KanbanCardStatus.DONE and self._col_done:
+    def _resolve_column_id(self, draft: KanbanCardDraft) -> str:
+        if self._column_id_for_draft is not None:
+            return self._column_id_for_draft(draft)
+        if draft.card_status.value == "done" and self._col_done:
             return self._col_done
-        if status == KanbanCardStatus.BLOCKED and self._col_blocked:
+        if draft.card_status.value == "blocked" and self._col_blocked:
             return self._col_blocked
         return self._col_todo
 
@@ -193,7 +197,7 @@ class YougileKanbanAdapter(KanbanPort):
         err = self._config_error()
         if err:
             return KanbanProviderCreateResult(False, None, None, err)
-        column_id = self._column_for_status(draft.card_status)
+        column_id = self._resolve_column_id(draft)
         body: dict[str, Any] = {
             "title": draft.title.strip()[:1024] or "Task",
             "columnId": column_id,
@@ -228,7 +232,7 @@ class YougileKanbanAdapter(KanbanPort):
         tid = external_card_id.strip()
         if not tid:
             return KanbanProviderCreateResult(False, None, None, "Missing external YouGile task id for update")
-        column_id = self._column_for_status(draft.card_status)
+        column_id = self._resolve_column_id(draft)
         body: dict[str, Any] = {
             "title": draft.title.strip()[:1024] or "Task",
             "columnId": column_id,

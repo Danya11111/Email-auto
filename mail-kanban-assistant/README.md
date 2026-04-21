@@ -171,6 +171,19 @@ mail-assistant build-digest --out ./data/digest.md
 
 The digest includes a short **Kanban sync** section when the DB has sync state (counts by status, recent errors).
 
+### Normal daily flow (local-first, YouGile-ready)
+
+1. **Ingest** (`ingest-eml` / `ingest-mbox` / `ingest-apple-mail-drop`).
+2. **Triage** (`triage`).
+3. **Extract tasks** (`extract-tasks`).
+4. **Review / approve** (`review-list`, `review-approve`).
+5. **`kanban-preview`** — dry plan (creates vs updates vs skips).
+6. **`kanban-sync`** (optionally `--dry-run`, `--changed-only`, `--no-include-resync`) or **`kanban-resync-changed`** for fingerprint drift on already-synced rows.
+7. **`kanban-status`** (and **`kanban-show-task-sync --task-id …`** for one task).
+8. **`build-digest`** — includes compact Kanban / YouGile ops lines when wired.
+
+**Source of truth:** the local SQLite pipeline (`extracted_tasks`, `kanban_sync_records`, fingerprints). YouGile is a **projection**, not bidirectional SOT.
+
 ### 7b) Kanban sync (approved tasks only)
 
 After tasks reach **`approved`** via the review queue, you can push them to a Kanban provider in an **idempotent** way:
@@ -188,7 +201,10 @@ After tasks reach **`approved`** via the review queue, you can push them to a Ka
 
 - SQLite `kanban_sync_records` stores `card_fingerprint` and `external_card_id` per `(task_id, provider)`.
 - Same fingerprint as the last **synced** row → **skip** (no duplicate POST).
-- **YouGile:** if the fingerprint **changes** after a successful sync, the safe default is **`YOUGILE_ENABLE_UPDATE_EXISTING=false`**: the run **skips** and marks the row skipped (no silent second task). Set `YOUGILE_ENABLE_UPDATE_EXISTING=true` to **PUT** title/description/deadline/column on the existing YouGile task.
+- **YouGile:** if the fingerprint **changes** after a successful sync, the safe default is **`YOUGILE_ENABLE_UPDATE_EXISTING=false`**: the run records **`skip_manual_resync`** in audit fields while keeping **`sync_status=synced`** (no silent second task, no loss of “already on board” state). Set `YOUGILE_ENABLE_UPDATE_EXISTING=true` to **PUT** title/description/deadline/column on the existing YouGile task.
+- **Column mapping (YouGile):** application policy maps local task lifecycle (`placement_task_status` on the draft) to TODO/DONE/BLOCKED columns; optional `YOUGILE_COLUMN_ID_DONE` / `YOUGILE_COLUMN_ID_BLOCKED` fall back to TODO with warnings if unset.
+- **`kanban-resync-changed`:** processes **only** rows that are already **synced** with an external id and whose current draft fingerprint differs — never does a silent mass create; respects the same update policy as normal sync.
+- **`kanban-show-task-sync`:** prints sync record + planned outbound action for a single `task_id` (JSON with `--json`).
 - **local_file:** same path is overwritten — treated as **create** path in code (no duplicate files).
 
 **Rate limits**
@@ -201,9 +217,17 @@ Commands:
 mail-assistant kanban-preview
 mail-assistant kanban-sync --dry-run
 mail-assistant kanban-sync
+# Optional batch controls
+mail-assistant kanban-sync --limit 20 --only-task-id 42 --changed-only
+mail-assistant kanban-sync --no-include-resync   # only new creates / pending repair paths, skip UPDATE_EXISTING plans
 mail-assistant kanban-status
+mail-assistant kanban-status --json
 mail-assistant kanban-status --probe   # YouGile: optional live GET checks
-mail-assistant kanban-retry-failed
+mail-assistant kanban-retry-failed --limit 20
+mail-assistant kanban-resync-changed --dry-run
+mail-assistant kanban-resync-changed --limit 50
+mail-assistant kanban-show-task-sync --task-id 42
+mail-assistant kanban-show-task-sync --task-id 42 --json
 mail-assistant kanban-export-local
 
 # YouGile onboarding (see §7c)

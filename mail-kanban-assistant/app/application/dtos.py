@@ -134,6 +134,8 @@ class KanbanDigestSectionDTO(BaseModel):
     synced: int
     failed: int
     recent_errors: tuple[str, ...] = Field(default_factory=tuple)
+    outbound_updates_last_24h: int = 0
+    manual_resync_pending: int = 0
 
 
 class DailyDigestContextDTO(BaseModel):
@@ -314,6 +316,11 @@ class KanbanSyncRecordRowDTO(BaseModel):
     last_attempt_at: datetime | None
     last_error: str | None
     retry_count: int
+    last_outbound_action: str | None = None
+    last_operation_note: str | None = None
+    previous_fingerprint: str | None = None
+    previous_external_card_url: str | None = None
+    record_updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +335,8 @@ class KanbanPreviewSummaryDTO:
     planned_creates: int = 0
     planned_updates: int = 0
     planned_skip_manual_resync: int = 0
+    planned_skip_provider_config: int = 0
+    planned_fail_precondition: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +349,9 @@ class KanbanSyncBatchResultDTO:
     failed: int
     dry_run: bool
     dry_run_planned: int = 0
+    skip_provider_config: int = 0
+    fail_precondition: int = 0
+    skip_manual_resync: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +360,8 @@ class KanbanRetryBatchResultDTO:
     attempted: int
     synced: int
     failed: int
+    updated: int = 0
+    skipped: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +373,41 @@ class KanbanStatusSummaryDTO:
     skipped: int
     last_errors: tuple[str, ...]
     provider_readiness: str | None = None
+    last_outbound_actions: tuple[str, ...] = ()
+    manual_resync_pending: int = 0
+    outbound_updates_last_24h: int = 0
+    yougile_update_existing_enabled: bool = False
+    yougile_done_column_configured: bool = False
+    yougile_blocked_column_configured: bool = False
+    next_step_hint: str | None = None
+
+
+class KanbanTaskSyncInspectionDTO(BaseModel):
+    """Operational snapshot for a single task + provider sync row."""
+
+    model_config = {"frozen": True}
+
+    task_id: int
+    provider: KanbanProvider
+    local_task_status: TaskStatus | None
+    sync_status: KanbanSyncStatus | None
+    card_fingerprint: str | None
+    external_card_id: str | None
+    external_card_url: str | None
+    last_outbound_action: str | None
+    last_operation_note: str | None
+    previous_fingerprint: str | None
+    previous_external_card_url: str | None
+    retry_count: int | None
+    last_error: str | None
+    last_attempt_at: str | None
+    synced_at: str | None
+    record_updated_at: str | None
+    planned_outbound_action: str | None
+    planned_reason_code: str | None
+    current_draft_fingerprint: str | None
+    update_existing_possible: bool
+    manual_resync_required: bool
 
 
 class YougileDiscoveryBoardDTO(BaseModel):

@@ -81,6 +81,15 @@ def compose_daily_digest_markdown(*, ctx: DailyDigestContextDTO, pipeline_notes:
             f"- Approved ready to sync: **{kb.approved_ready_to_sync}**; "
             f"outbox pending: **{kb.pending_outbox}**; synced records: **{kb.synced}**; failed: **{kb.failed}**"
         )
+        if kb.outbound_updates_last_24h or kb.manual_resync_pending:
+            lines.append(
+                f"- Recent outbound writes (24h): **{kb.outbound_updates_last_24h}**; "
+                f"manual resync backlog: **{kb.manual_resync_pending}**"
+            )
+        if kb.provider == "yougile":
+            lines.append(
+                "- YouGile: use `kanban-status` for column/update policy; `kanban-resync-changed` for drift-only updates."
+            )
         if kb.recent_errors:
             lines.append("- Recent sync errors:")
             for err in kb.recent_errors[:5]:

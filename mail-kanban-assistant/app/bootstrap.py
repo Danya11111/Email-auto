@@ -17,7 +17,9 @@ from app.application.use_cases.kanban_sync import (
     ExportLocalKanbanBoardUseCase,
     ListKanbanSyncStatusUseCase,
     PreviewKanbanSyncCandidatesUseCase,
+    ResyncChangedFingerprintsKanbanUseCase,
     RetryFailedKanbanSyncUseCase,
+    ShowKanbanTaskSyncUseCase,
     SyncApprovedTasksToKanbanUseCase,
 )
 from app.application.use_cases.process_apple_mail_drop import ProcessAppleMailDropUseCase
@@ -87,6 +89,8 @@ class KanbanCliWiring(NamedTuple):
     retry: RetryFailedKanbanSyncUseCase
     status: ListKanbanSyncStatusUseCase
     export: ExportLocalKanbanBoardUseCase
+    resync_changed: ResyncChangedFingerprintsKanbanUseCase
+    show_task_sync: ShowKanbanTaskSyncUseCase
 
 
 def build_kanban_wiring(
@@ -115,6 +119,14 @@ def build_kanban_wiring(
     )
     status_uc = ListKanbanSyncStatusUseCase(sync=sync_repo, settings=settings)
     export_uc = ExportLocalKanbanBoardUseCase(settings=settings, logger=logger)
+    resync_uc = ResyncChangedFingerprintsKanbanUseCase(
+        tasks=tasks_repo,
+        sync=sync_repo,
+        kanban=kanban,
+        logger=logger,
+        settings=settings,
+    )
+    show_uc = ShowKanbanTaskSyncUseCase(tasks=tasks_repo, sync=sync_repo, settings=settings)
     return KanbanCliWiring(
         kanban_port=kanban,
         preview=preview,
@@ -122,6 +134,8 @@ def build_kanban_wiring(
         retry=retry_uc,
         status=status_uc,
         export=export_uc,
+        resync_changed=resync_uc,
+        show_task_sync=show_uc,
     )
 
 

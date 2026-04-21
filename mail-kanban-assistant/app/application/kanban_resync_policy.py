@@ -1,24 +1,22 @@
 from __future__ import annotations
 
-from enum import StrEnum
+"""Backward-compatible re-exports; outbound decisions live in `outbound_kanban_planner`."""
 
+from app.application.outbound_kanban_planner import (
+    OutboundKanbanAction as KanbanOutboundPlan,
+    OutboundKanbanPlan,
+    plan_outbound_kanban_action,
+)
 from app.application.ports import KanbanSyncRepositoryPort
 from app.config import AppSettings
-from app.domain.enums import KanbanProvider, KanbanSyncStatus
+from app.domain.enums import KanbanProvider, TaskStatus
 from app.domain.models import KanbanCardDraft
 
-
-class KanbanOutboundPlan(StrEnum):
-    """Planned external action for an approved task at the active provider."""
-
-    SKIP_SAME_FINGERPRINT = "skip_same_fingerprint"
-    """Fingerprint matches last successful sync — no write."""
-    CREATE = "create"
-    """Create a new external card/task (or overwrite local_file JSON in-place)."""
-    UPDATE_EXISTING = "update_existing"
-    """Safe in-place update of an existing external task (provider + config must allow)."""
-    SKIP_MANUAL_RESYNC = "skip_manual_resync"
-    """Fingerprint changed after sync but policy forbids silent create/update (YouGile default)."""
+# Legacy alias values (StrEnum) — use OutboundKanbanAction in new code.
+SKIP_SAME_FINGERPRINT = KanbanOutboundPlan.SKIP_ALREADY_SYNCED
+CREATE = KanbanOutboundPlan.CREATE
+UPDATE_EXISTING = KanbanOutboundPlan.UPDATE_EXISTING
+SKIP_MANUAL_RESYNC = KanbanOutboundPlan.SKIP_MANUAL_RESYNC
 
 
 def plan_kanban_outbound(
@@ -28,43 +26,26 @@ def plan_kanban_outbound(
     sync: KanbanSyncRepositoryPort,
     task_id: int,
     draft: KanbanCardDraft,
+    task_status: TaskStatus = TaskStatus.APPROVED,
 ) -> KanbanOutboundPlan:
-    if sync.maybe_skip_if_already_synced_same_fingerprint(task_id=task_id, provider=provider, fingerprint=draft.fingerprint):
-        return KanbanOutboundPlan.SKIP_SAME_FINGERPRINT
+    """Delegate to centralized planner (returns action enum only for compatibility)."""
+    return plan_outbound_kanban_action(
+        task_status=task_status,
+        provider=provider,
+        settings=settings,
+        sync=sync,
+        task_id=task_id,
+        draft=draft,
+    ).action
 
-    existing = sync.get_sync_record_for_task(task_id, provider)
-    if existing is None:
-        return KanbanOutboundPlan.CREATE
 
-    if existing.sync_status == KanbanSyncStatus.FAILED:
-        ext = (existing.external_card_id or "").strip()
-        if not ext:
-            return KanbanOutboundPlan.CREATE
-        if draft.fingerprint == existing.card_fingerprint:
-            return KanbanOutboundPlan.UPDATE_EXISTING
-        if provider == KanbanProvider.YOUGILE and not settings.yougile_enable_update_existing:
-            return KanbanOutboundPlan.SKIP_MANUAL_RESYNC
-        if provider == KanbanProvider.YOUGILE and settings.yougile_enable_update_existing:
-            return KanbanOutboundPlan.UPDATE_EXISTING
-        return KanbanOutboundPlan.CREATE
-
-    if existing.sync_status != KanbanSyncStatus.SYNCED:
-        return KanbanOutboundPlan.CREATE
-
-    if existing.card_fingerprint == draft.fingerprint:
-        return KanbanOutboundPlan.SKIP_SAME_FINGERPRINT
-    if not (existing.external_card_id or "").strip():
-        return KanbanOutboundPlan.CREATE
-
-    if provider == KanbanProvider.YOUGILE:
-        if settings.yougile_enable_update_existing:
-            return KanbanOutboundPlan.UPDATE_EXISTING
-        return KanbanOutboundPlan.SKIP_MANUAL_RESYNC
-
-    if provider == KanbanProvider.LOCAL_FILE:
-        return KanbanOutboundPlan.CREATE
-
-    if provider == KanbanProvider.TRELLO:
-        return KanbanOutboundPlan.CREATE
-
-    return KanbanOutboundPlan.CREATE
+__all__ = [
+    "KanbanOutboundPlan",
+    "OutboundKanbanPlan",
+    "plan_kanban_outbound",
+    "plan_outbound_kanban_action",
+    "SKIP_SAME_FINGERPRINT",
+    "CREATE",
+    "UPDATE_EXISTING",
+    "SKIP_MANUAL_RESYNC",
+]

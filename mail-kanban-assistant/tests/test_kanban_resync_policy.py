@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.application.kanban_resync_policy import KanbanOutboundPlan, plan_kanban_outbound
+from app.application.kanban_resync_policy import KanbanOutboundPlan, SKIP_SAME_FINGERPRINT, plan_kanban_outbound
 from app.config import AppSettings
 from app.domain.enums import KanbanCardStatus, KanbanPriority, KanbanProvider, KanbanSyncStatus, MessageImportance, ReplyRequirement, TaskStatus
 from app.domain.models import KanbanCardDraft
@@ -44,6 +44,13 @@ class _MemSync:
             retry_count=0,
         )
 
+    def record_outbound_audit_preserve_synced(self, *, record_id: int, outbound_action: str, operation_note: str | None) -> None:
+        _ = (record_id, outbound_action, operation_note)
+
+    def list_task_ids_for_resync_changed(self, provider: KanbanProvider, limit: int) -> tuple[int, ...]:
+        _ = (provider, limit)
+        return ()
+
 
 def _draft(fp: str = "a") -> KanbanCardDraft:
     return KanbanCardDraft(
@@ -60,15 +67,22 @@ def _draft(fp: str = "a") -> KanbanCardDraft:
     )
 
 
-def test_plan_skip_same_fingerprint() -> None:
+def _yg_settings(monkeypatch: pytest.MonkeyPatch | None = None) -> AppSettings:
+    if monkeypatch is not None:
+        monkeypatch.setenv("YOUGILE_API_KEY", "k")
+        monkeypatch.setenv("YOUGILE_COLUMN_ID_TODO", "col-todo")
+    return AppSettings()
+
+
+def test_plan_skip_same_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
     sync = _MemSync(synced_fp="same")
-    s = AppSettings()
-    assert plan_kanban_outbound(provider=KanbanProvider.YOUGILE, settings=s, sync=sync, task_id=1, draft=_draft("same")) == KanbanOutboundPlan.SKIP_SAME_FINGERPRINT
+    s = _yg_settings(monkeypatch)
+    assert plan_kanban_outbound(provider=KanbanProvider.YOUGILE, settings=s, sync=sync, task_id=1, draft=_draft("same")) == SKIP_SAME_FINGERPRINT
 
 
 def test_plan_yougile_skip_manual_on_fp_change(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YOUGILE_ENABLE_UPDATE_EXISTING", "false")
-    s = AppSettings()
+    s = _yg_settings(monkeypatch)
     sync = _MemSync(synced_fp="old")
     assert (
         plan_kanban_outbound(provider=KanbanProvider.YOUGILE, settings=s, sync=sync, task_id=1, draft=_draft("new"))
@@ -78,7 +92,7 @@ def test_plan_yougile_skip_manual_on_fp_change(monkeypatch: pytest.MonkeyPatch) 
 
 def test_plan_yougile_update_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YOUGILE_ENABLE_UPDATE_EXISTING", "true")
-    s = AppSettings()
+    s = _yg_settings(monkeypatch)
     sync = _MemSync(synced_fp="old")
     assert plan_kanban_outbound(provider=KanbanProvider.YOUGILE, settings=s, sync=sync, task_id=1, draft=_draft("new")) == KanbanOutboundPlan.UPDATE_EXISTING
 
@@ -91,6 +105,33 @@ def test_plan_local_file_recreate_on_fp_change() -> None:
 
 def test_plan_failed_resume_update_same_fp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YOUGILE_ENABLE_UPDATE_EXISTING", "false")
-    s = AppSettings()
+    s = _yg_settings(monkeypatch)
     sync = _MemSync(synced_fp="fp1", ext_id="e1", status=KanbanSyncStatus.FAILED)
     assert plan_kanban_outbound(provider=KanbanProvider.YOUGILE, settings=s, sync=sync, task_id=1, draft=_draft("fp1")) == KanbanOutboundPlan.UPDATE_EXISTING
+
+
+def test_plan_candidate_fail_precondition(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _yg_settings(monkeypatch)
+    sync = _MemSync(synced_fp=None)
+    assert (
+        plan_kanban_outbound(
+            provider=KanbanProvider.YOUGILE,
+            settings=s,
+            sync=sync,
+            task_id=1,
+            draft=_draft("x"),
+            task_status=TaskStatus.CANDIDATE,
+        )
+        == KanbanOutboundPlan.FAIL_PRECONDITION
+    )
+
+
+def test_plan_yougile_skip_when_config_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("YOUGILE_API_KEY", raising=False)
+    monkeypatch.delenv("YOUGILE_COLUMN_ID_TODO", raising=False)
+    s = AppSettings()
+    sync = _MemSync(synced_fp=None)
+    assert (
+        plan_kanban_outbound(provider=KanbanProvider.YOUGILE, settings=s, sync=sync, task_id=1, draft=_draft("x"))
+        == KanbanOutboundPlan.SKIP_PROVIDER_CONFIG
+    )

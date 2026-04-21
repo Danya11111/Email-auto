@@ -94,6 +94,11 @@ def upgrade_schema(conn: sqlite3.Connection) -> None:
           last_attempt_at TEXT,
           last_error TEXT,
           retry_count INTEGER NOT NULL DEFAULT 0,
+          last_outbound_action TEXT,
+          last_operation_note TEXT,
+          previous_fingerprint TEXT,
+          previous_external_card_url TEXT,
+          record_updated_at TEXT,
           FOREIGN KEY(task_id) REFERENCES extracted_tasks(id) ON DELETE CASCADE,
           UNIQUE(task_id, provider)
         )
@@ -102,4 +107,26 @@ def upgrade_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kanban_sync_status ON kanban_sync_records(sync_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_kanban_sync_provider ON kanban_sync_records(provider)")
 
+    _upgrade_kanban_sync_audit_columns(conn)
+
     conn.commit()
+
+
+def _upgrade_kanban_sync_audit_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(kanban_sync_records)").fetchall()
+    if not rows:
+        return
+    cols = {str(r[1]) for r in rows}
+    alters: list[str] = []
+    if "last_outbound_action" not in cols:
+        alters.append("ALTER TABLE kanban_sync_records ADD COLUMN last_outbound_action TEXT")
+    if "last_operation_note" not in cols:
+        alters.append("ALTER TABLE kanban_sync_records ADD COLUMN last_operation_note TEXT")
+    if "previous_fingerprint" not in cols:
+        alters.append("ALTER TABLE kanban_sync_records ADD COLUMN previous_fingerprint TEXT")
+    if "previous_external_card_url" not in cols:
+        alters.append("ALTER TABLE kanban_sync_records ADD COLUMN previous_external_card_url TEXT")
+    if "record_updated_at" not in cols:
+        alters.append("ALTER TABLE kanban_sync_records ADD COLUMN record_updated_at TEXT")
+    for stmt in alters:
+        conn.execute(stmt)

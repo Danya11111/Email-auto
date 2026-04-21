@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 
 from app.application.dtos import TaskKanbanSourceContextDTO
-from app.domain.enums import KanbanCardStatus, KanbanPriority, MessageImportance
+from app.domain.enums import KanbanCardStatus, KanbanPriority, MessageImportance, TaskStatus
 from app.domain.models import KanbanCardDraft
 
 
@@ -16,6 +16,18 @@ class KanbanMappingOptions:
     include_review_metadata: bool = True
     include_message_metadata: bool = True
     default_card_status: KanbanCardStatus = KanbanCardStatus.TODO
+    assignee_external_id: str | None = None
+
+
+def resolve_card_status_for_kanban_task(task_status: TaskStatus, default: KanbanCardStatus) -> KanbanCardStatus:
+    """Map persisted task lifecycle to logical card column state (drives fingerprint + YouGile column policy)."""
+    if task_status == TaskStatus.SYNCED:
+        return KanbanCardStatus.DONE
+    if task_status == TaskStatus.REJECTED:
+        return KanbanCardStatus.BLOCKED
+    if task_status == TaskStatus.CANDIDATE:
+        return default
+    return KanbanCardStatus.TODO if task_status == TaskStatus.APPROVED else default
 
 
 def triage_importance_to_priority(importance: MessageImportance | None) -> KanbanPriority:
@@ -112,4 +124,6 @@ def build_kanban_card_draft(ctx: TaskKanbanSourceContextDTO, options: KanbanMapp
         labels=labels,
         dedupe_marker=dedupe_marker,
         fingerprint=fingerprint,
+        assignee_external_id=options.assignee_external_id,
+        placement_task_status=ctx.task.status,
     )

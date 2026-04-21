@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import dataclasses
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -360,6 +362,8 @@ def kanban_sync_cmd(
     limit: Optional[int] = typer.Option(None, "--limit", min=1, max=500),
     only_task_id: Optional[int] = typer.Option(None, "--only-task-id"),
     dry_run: bool = typer.Option(False, "--dry-run"),
+    include_resync: bool = typer.Option(True, "--include-resync/--no-include-resync", help="Allow UPDATE_EXISTING plans."),
+    changed_only: bool = typer.Option(False, "--changed-only", help="Only tasks whose fingerprint differs from last record."),
 ) -> None:
     settings = AppSettings()
     conn = open_connection(settings.database_path)
@@ -374,11 +378,14 @@ def kanban_sync_cmd(
         dry_run=dry_run,
         limit=limit,
         only_task_id=only_task_id,
+        include_resync=include_resync,
+        changed_only=changed_only,
     )
     typer.echo(
         f"kanban-sync done: found={res.found} synced={res.synced} updated={res.updated} "
         f"skipped={res.skipped} failed={res.failed} dry_run={res.dry_run} dry_run_planned={res.dry_run_planned} "
-        f"run_id={res.run_id}"
+        f"skip_provider_config={res.skip_provider_config} fail_precondition={res.fail_precondition} "
+        f"skip_manual_resync={res.skip_manual_resync} run_id={res.run_id}"
     )
     conn.close()
 
@@ -396,7 +403,68 @@ def kanban_retry_failed_cmd(
     kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
     prov = _parse_kanban_provider(provider, settings.kanban_provider)
     res = kb.retry.execute(run_id=new_run_id(), provider=prov, limit=limit)
-    typer.echo(f"kanban-retry-failed done: attempted={res.attempted} synced={res.synced} failed={res.failed} run_id={res.run_id}")
+    typer.echo(
+        f"kanban-retry-failed done: attempted={res.attempted} synced={res.synced} updated={res.updated} "
+        f"skipped={res.skipped} failed={res.failed} run_id={res.run_id}"
+    )
+    conn.close()
+
+
+@app.command("kanban-resync-changed")
+def kanban_resync_changed_cmd(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+    limit: Optional[int] = typer.Option(None, "--limit", min=1, max=500),
+    only_task_id: Optional[int] = typer.Option(None, "--only-task-id"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
+    prov = _parse_kanban_provider(provider, settings.kanban_provider)
+    res = kb.resync_changed.execute(
+        run_id=new_run_id(),
+        provider=prov,
+        dry_run=dry_run,
+        limit=limit,
+        only_task_id=only_task_id,
+    )
+    typer.echo(
+        f"kanban-resync-changed done: found={res.found} updated={res.updated} skipped={res.skipped} "
+        f"failed={res.failed} dry_run={res.dry_run} dry_run_planned={res.dry_run_planned} "
+        f"skip_manual_resync={res.skip_manual_resync} run_id={res.run_id}"
+    )
+    conn.close()
+
+
+@app.command("kanban-show-task-sync")
+def kanban_show_task_sync_cmd(
+    task_id: int = typer.Option(..., "--task-id", min=1),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Override KANBAN_PROVIDER."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON inspection."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    tasks = SqliteTaskRepository(conn, clock)
+    kb = build_kanban_wiring(conn, clock, StructuredLoggerAdapter(), settings, tasks)
+    prov = _parse_kanban_provider(provider, settings.kanban_provider)
+    dto = kb.show_task_sync.execute(task_id=task_id, provider=prov)
+    if as_json:
+        typer.echo(json.dumps(dto.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(f"task_id={dto.task_id} provider={dto.provider.value} local_status={dto.local_task_status}")
+        typer.echo(
+            f"  sync_status={dto.sync_status} planned_action={dto.planned_outbound_action} reason={dto.planned_reason_code}"
+        )
+        typer.echo(f"  fingerprint(record)={dto.card_fingerprint} draft_fingerprint={dto.current_draft_fingerprint}")
+        typer.echo(f"  external_id={dto.external_card_id} url={dto.external_card_url}")
+        typer.echo(
+            f"  last_action={dto.last_outbound_action} note={dto.last_operation_note} retries={dto.retry_count} last_error={dto.last_error}"
+        )
+        typer.echo(f"  update_possible={dto.update_existing_possible} manual_resync_required={dto.manual_resync_required}")
     conn.close()
 
 
@@ -408,6 +476,7 @@ def kanban_status_cmd(
         "--probe",
         help="For YouGile: run a few live GET checks (boards/column) when API key is set.",
     ),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON summary."),
 ) -> None:
     settings = AppSettings()
     conn = open_connection(settings.database_path)
@@ -417,18 +486,38 @@ def kanban_status_cmd(
     kb = build_kanban_wiring(conn, clock, logger, settings, tasks)
     prov = _parse_kanban_provider(provider, settings.kanban_provider)
     st = kb.status.execute(provider=prov)
-    typer.echo(
-        f"provider={st.provider.value} pending={st.pending} synced={st.synced} failed={st.failed} skipped={st.skipped}"
-    )
-    if st.provider_readiness:
-        typer.echo(f"  readiness: {st.provider_readiness}")
-    if probe and prov == KanbanProvider.YOUGILE:
-        for line in run_yougile_live_status_probe(settings, logger):
-            typer.echo(f"  {line}")
-    elif probe and prov != KanbanProvider.YOUGILE:
-        typer.echo("  probe: skipped (only meaningful for KANBAN_PROVIDER=yougile)")
-    for err in st.last_errors:
-        typer.echo(f"  err: {err[:300]}")
+    if as_json:
+
+        def _json_default(o: object) -> object:
+            if isinstance(o, Enum):
+                return o.value
+            raise TypeError(type(o))
+
+        typer.echo(json.dumps(dataclasses.asdict(st), default=_json_default, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(
+            f"provider={st.provider.value} pending={st.pending} synced={st.synced} failed={st.failed} skipped={st.skipped}"
+        )
+        typer.echo(
+            f"  manual_resync_pending={st.manual_resync_pending} outbound_updates_24h={st.outbound_updates_last_24h} "
+            f"last_actions={list(st.last_outbound_actions)}"
+        )
+        if prov == KanbanProvider.YOUGILE:
+            typer.echo(
+                f"  yougile_update_existing={st.yougile_update_existing_enabled} "
+                f"done_col={st.yougile_done_column_configured} blocked_col={st.yougile_blocked_column_configured}"
+            )
+        if st.provider_readiness:
+            typer.echo(f"  readiness: {st.provider_readiness}")
+        if st.next_step_hint:
+            typer.echo(f"  next: {st.next_step_hint}")
+        if probe and prov == KanbanProvider.YOUGILE:
+            for line in run_yougile_live_status_probe(settings, logger):
+                typer.echo(f"  {line}")
+        elif probe and prov != KanbanProvider.YOUGILE:
+            typer.echo("  probe: skipped (only meaningful for KANBAN_PROVIDER=yougile)")
+        for err in st.last_errors:
+            typer.echo(f"  err: {err[:300]}")
     conn.close()
 
 

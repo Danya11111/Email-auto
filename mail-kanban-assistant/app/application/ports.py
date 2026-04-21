@@ -139,6 +139,7 @@ class KanbanSyncRepositoryPort(Protocol):
         fingerprint: str,
         external_card_id: str | None,
         external_card_url: str | None,
+        outbound_action: str | None = None,
     ) -> None:
         ...
 
@@ -166,6 +167,14 @@ class KanbanSyncRepositoryPort(Protocol):
 
     def load_status_summary(self, provider: KanbanProvider) -> KanbanStatusSummaryDTO:
         ...
+
+    def record_outbound_audit_preserve_synced(
+        self, *, record_id: int, outbound_action: str, operation_note: str | None
+    ) -> None:
+        """Append audit fields without moving a successful row out of SYNCED."""
+
+    def list_task_ids_for_resync_changed(self, provider: KanbanProvider, limit: int) -> tuple[int, ...]:
+        """Candidates for fingerprint drift handling (synced row + external id + eligible task status)."""
 
 
 class ClockPort(Protocol):

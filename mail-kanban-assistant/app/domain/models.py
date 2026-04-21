@@ -81,6 +81,10 @@ class KanbanCardDraft:
     labels: tuple[str, ...]
     dedupe_marker: str
     fingerprint: str
+    assignee_external_id: str | None = None
+    """Optional YouGile user id for future assignee wiring; not sent in MVP."""
+    placement_task_status: TaskStatus | None = None
+    """Local task status for provider column placement; excluded from fingerprint."""
 
 
 @dataclass(frozen=True, slots=True)

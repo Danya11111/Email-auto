@@ -151,6 +151,18 @@ def test_cli_kanban_preview_status_dry_run(tmp_path: Path, monkeypatch) -> None:
     assert "kanban-sync done:" in r3.stdout
     assert "updated=" in r3.stdout
 
+    r3b = runner.invoke(app, ["kanban-resync-changed", "--dry-run"], env={**os.environ})
+    assert r3b.exit_code == 0
+    assert "kanban-resync-changed" in r3b.stdout
+
+    r3c = runner.invoke(app, ["kanban-show-task-sync", "--task-id", "1", "--json"], env={**os.environ})
+    assert r3c.exit_code == 0
+    assert "task_id" in r3c.stdout
+
+    r3d = runner.invoke(app, ["kanban-status", "--json"], env={**os.environ})
+    assert r3d.exit_code == 0
+    assert "pending" in r3d.stdout
+
     r4 = runner.invoke(app, ["kanban-export-local"], env={**os.environ})
     assert r4.exit_code == 0
     assert "wrote" in r4.stdout

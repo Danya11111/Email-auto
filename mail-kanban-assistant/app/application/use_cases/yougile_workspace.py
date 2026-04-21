@@ -225,6 +225,7 @@ class YougileSmokeSyncUseCase:
             sync=self.sync,
             task_id=task_id,
             draft=draft,
+            task_status=TaskStatus.APPROVED,
         )
         if dry_run:
             return YougileSmokeSyncResultDTO(

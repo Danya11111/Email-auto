@@ -159,12 +159,42 @@ class DoctorEnvironmentUseCase:
                 lines.append(DoctorLineDTO("OK", "YouGile mandatory settings appear present (API key + TODO column)."))
             if not (settings.yougile_board_id or "").strip():
                 lines.append(DoctorLineDTO("WARN", "YOUGILE_BOARD_ID empty — adapter healthcheck may fail."))
+            if not (settings.yougile_column_id_done or "").strip():
+                lines.append(
+                    DoctorLineDTO(
+                        "WARN",
+                        "YOUGILE_COLUMN_ID_DONE empty — synced/done-like tasks fall back to TODO column (see column policy warnings in logs).",
+                    )
+                )
+            if not (settings.yougile_column_id_blocked or "").strip():
+                lines.append(
+                    DoctorLineDTO(
+                        "WARN",
+                        "YOUGILE_COLUMN_ID_BLOCKED empty — blocked/rejected mapping falls back to TODO column.",
+                    )
+                )
             if not settings.yougile_enable_update_existing:
                 lines.append(
                     DoctorLineDTO(
                         "OK",
                         "YOUGILE_ENABLE_UPDATE_EXISTING=false (safe default: no silent remote edits after fingerprint changes).",
                     )
+                )
+            else:
+                lines.append(
+                    DoctorLineDTO(
+                        "WARN",
+                        "YOUGILE_ENABLE_UPDATE_EXISTING=true — remote cards receive safe field updates when local fingerprint drifts.",
+                    )
+                )
+            rl = int(settings.kanban_retry_limit)
+            if rl < 3:
+                lines.append(
+                    DoctorLineDTO("WARN", f"KANBAN_RETRY_LIMIT={rl} is low; transient API errors may exhaust retries quickly.")
+                )
+            if rl > 30:
+                lines.append(
+                    DoctorLineDTO("WARN", f"KANBAN_RETRY_LIMIT={rl} is high; watch backlog size vs provider rate limits.")
                 )
             lines.append(
                 DoctorLineDTO(
