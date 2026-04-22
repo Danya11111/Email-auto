@@ -6,6 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.domain.enums import (
+    ActionCenterCategory,
     IngestedArtifactStatus,
     KanbanProvider,
     KanbanSyncStatus,
@@ -13,9 +14,11 @@ from app.domain.enums import (
     MessageProcessingStatus,
     MessageSource,
     ReplyRequirement,
+    ReplyState,
     ReviewKind,
     ReviewStatus,
     TaskStatus,
+    ThreadActionState,
 )
 
 
@@ -138,6 +141,116 @@ class KanbanDigestSectionDTO(BaseModel):
     manual_resync_pending: int = 0
 
 
+class ActionCenterTaskPinDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    task_id: int
+    message_id: int
+    title: str
+    status: TaskStatus
+    confidence: float
+    due_at: str | None = None
+
+
+class ActionCenterMessageRowDTO(BaseModel):
+    """Single message row joined with triage for thread-aware processing."""
+
+    model_config = {"frozen": True}
+
+    message_id: int
+    received_at: datetime | None
+    subject: str | None
+    sender: str | None
+    recipients: tuple[str, ...] = Field(default_factory=tuple)
+    thread_hint: str | None
+    importance: MessageImportance
+    reply_requirement: ReplyRequirement
+    actionable: bool
+    triage_summary: str
+    triage_confidence: float = 0.0
+
+
+class KanbanSyncFailurePinDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    sync_record_id: int
+    task_id: int
+    provider: str
+    last_error: str
+
+
+class ActionCenterRawBundleDTO(BaseModel):
+    """Inputs loaded from SQLite for deterministic action center construction."""
+
+    model_config = {"frozen": True}
+
+    window_start: datetime
+    window_end: datetime
+    messages: tuple[ActionCenterMessageRowDTO, ...]
+    task_pins: tuple[ActionCenterTaskPinDTO, ...]
+    pending_reviews: tuple[DigestReviewSnapshotDTO, ...]
+    kanban_failures: tuple[KanbanSyncFailurePinDTO, ...]
+    approved_ready_to_sync: int
+    manual_resync_backlog: int
+
+
+class MessageThreadSummaryDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    thread_id: str
+    related_message_ids: tuple[int, ...]
+    latest_message_at: datetime | None
+    participants: tuple[str, ...]
+    subject_line: str
+    aggregated_importance: MessageImportance
+    max_reply_requirement: ReplyRequirement
+    any_actionable: bool
+    reply_state: ReplyState
+    thread_action_state: ThreadActionState
+    candidate_task_ids: tuple[int, ...] = Field(default_factory=tuple)
+    pending_review_ids: tuple[int, ...] = Field(default_factory=tuple)
+    likely_active: bool
+    include_in_action_center: bool
+    max_candidate_task_confidence: float = 0.0
+    signals: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class DailyActionItemDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    item_id: str
+    source_type: str
+    category: ActionCenterCategory
+    priority_score: int
+    title: str
+    reason: str
+    recommended_next_step: str
+    thread_id: str | None = None
+    message_ids: tuple[int, ...] = Field(default_factory=tuple)
+    task_id: int | None = None
+    review_id: int | None = None
+    due_at: str | None = None
+    reply_state: ReplyState | None = None
+    signals: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class ActionCenterCategorySectionDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    category: ActionCenterCategory
+    items: tuple[DailyActionItemDTO, ...]
+
+
+class ActionCenterSnapshotDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    window_start: datetime
+    window_end: datetime
+    threads: tuple[MessageThreadSummaryDTO, ...]
+    items: tuple[DailyActionItemDTO, ...]
+    category_sections: tuple[ActionCenterCategorySectionDTO, ...]
+
+
 class DailyDigestContextDTO(BaseModel):
     model_config = {"frozen": True}
 
@@ -148,6 +261,8 @@ class DailyDigestContextDTO(BaseModel):
     candidate_tasks: tuple[DigestTaskSnapshotDTO, ...]
     pending_reviews: tuple[DigestReviewSnapshotDTO, ...]
     kanban: KanbanDigestSectionDTO | None = None
+    action_center: ActionCenterSnapshotDTO | None = None
+    executive_summary_lines: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class ReviewEnqueueCommandDTO(BaseModel):

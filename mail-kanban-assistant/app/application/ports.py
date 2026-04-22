@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from app.application.dtos import (
+    ActionCenterRawBundleDTO,
     DailyDigestContextDTO,
     DigestLLMResponseDTO,
     IngestedArtifactRecordDTO,
@@ -50,6 +51,9 @@ class MessageRepositoryPort(Protocol):
         ...
 
     def list_messages_for_digest(self, window_start: datetime, window_end: datetime) -> Sequence[PersistedMessageDTO]:
+        ...
+
+    def get_message_by_id(self, message_id: int) -> PersistedMessageDTO | None:
         ...
 
     def update_processing_status(self, message_id: int, status: MessageProcessingStatus) -> None:
@@ -230,6 +234,17 @@ class DigestContextPort(Protocol):
     def load_daily_digest_context(
         self, *, window_start: datetime, window_end: datetime, max_messages: int
     ) -> DailyDigestContextDTO:
+        ...
+
+    def load_action_center_raw_bundle(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        max_message_rows: int,
+        kanban_provider: KanbanProvider,
+    ) -> ActionCenterRawBundleDTO:
+        """Load triaged message rows + task/review pins + kanban failure pins for action center (deterministic SQL)."""
         ...
 
 

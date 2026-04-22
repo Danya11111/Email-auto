@@ -27,6 +27,25 @@ class AppSettings(BaseSettings):
     digest_lookback_hours: int = Field(default=24, validation_alias="DIGEST_LOOKBACK_HOURS")
     digest_max_messages: int = Field(default=30, validation_alias="DIGEST_MAX_MESSAGES")
 
+    action_center_lookback_hours: int = Field(default=72, validation_alias="ACTION_CENTER_LOOKBACK_HOURS")
+    action_center_max_items: int = Field(default=40, validation_alias="ACTION_CENTER_MAX_ITEMS")
+    action_center_max_messages: int = Field(default=300, validation_alias="ACTION_CENTER_MAX_MESSAGES")
+    action_center_include_informational: bool = Field(default=False, validation_alias="ACTION_CENTER_INCLUDE_INFORMATIONAL")
+    reply_overdue_hours: int = Field(default=48, validation_alias="REPLY_OVERDUE_HOURS")
+    reply_recommended_hours: int = Field(default=24, validation_alias="REPLY_RECOMMENDED_HOURS")
+    thread_grouping_time_window_hours: int = Field(default=96, validation_alias="THREAD_GROUPING_TIME_WINDOW_HOURS")
+    action_center_use_llm_executive_summary: bool = Field(
+        default=False,
+        validation_alias="ACTION_CENTER_USE_LLM_EXECUTIVE_SUMMARY",
+        description="Reserved: deterministic executive summary is default (low-memory).",
+    )
+    action_center_executive_summary_max_items: int = Field(default=4, validation_alias="ACTION_CENTER_EXECUTIVE_SUMMARY_MAX_ITEMS")
+    action_center_require_review_for_ambiguous_reply: bool = Field(
+        default=True,
+        validation_alias="ACTION_CENTER_REQUIRE_REVIEW_FOR_AMBIGUOUS_REPLY",
+        description="When true, pending reviews force ReplyState.AMBIGUOUS for the thread.",
+    )
+
     triage_batch_size: int = Field(default=10, validation_alias="TRIAGE_BATCH_SIZE")
     task_extraction_batch_size: int = Field(default=10, validation_alias="TASK_EXTRACTION_BATCH_SIZE")
 
@@ -182,3 +201,31 @@ class AppSettings(BaseSettings):
     def _cap_concurrency(cls, value: int) -> int:
         # MVP: sequential processing only (safe on 8GB unified memory machines).
         return 1 if int(value) < 1 else 1
+
+    @field_validator(
+        "action_center_lookback_hours",
+        "action_center_max_items",
+        "action_center_max_messages",
+        "reply_overdue_hours",
+        "reply_recommended_hours",
+        "thread_grouping_time_window_hours",
+        "action_center_executive_summary_max_items",
+    )
+    @classmethod
+    def _positive_int_action_center(cls, value: int) -> int:
+        v = int(value)
+        if v < 1:
+            return 1
+        return v
+
+    @field_validator(
+        "action_center_include_informational",
+        "action_center_use_llm_executive_summary",
+        "action_center_require_review_for_ambiguous_reply",
+        mode="before",
+    )
+    @classmethod
+    def _bool_action_center_flags(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return value

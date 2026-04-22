@@ -232,11 +232,8 @@ def test_digest_includes_kanban_section(conn, tmp_path: Path, monkeypatch: pytes
         digests=digests,
         clock=clock,
         logger=logger,
-        lookback_hours=24,
-        digest_max_messages=30,
+        settings=settings,
         kanban_sync=kb_sync,
-        kanban_provider=settings.kanban_provider,
-        kanban_auto_sync=False,
     )
     res = uc.execute(run_id="dg", pipeline_run_db_id=None, pipeline_stats={})
     assert "## Kanban sync" in res.markdown

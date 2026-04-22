@@ -8,6 +8,7 @@ import pytest
 from app.application.dtos import IncomingMessageDTO
 from app.application.use_cases.build_morning_digest import BuildMorningDigestUseCase
 from app.application.use_cases.ingest_messages import IngestMessagesUseCase
+from app.config import AppSettings
 from app.domain.enums import KanbanProvider, MessageImportance, MessageProcessingStatus, MessageSource, ReplyRequirement
 from app.infrastructure.storage.repositories import (
     SqliteDigestContextRepository,
@@ -82,26 +83,33 @@ def test_build_digest_persists_and_contains_sections(conn) -> None:
     messages.update_processing_status(mid, MessageProcessingStatus.TRIAGED)
 
     kb_sync = SqliteKanbanSyncRepository(conn, clock)
+    settings = AppSettings(
+        digest_lookback_hours=24,
+        digest_max_messages=30,
+        kanban_provider=KanbanProvider.LOCAL_FILE,
+        kanban_auto_sync=False,
+    )
     uc = BuildMorningDigestUseCase(
         digest_context=digest_ctx,
         digests=digests,
         clock=clock,
         logger=logger,
-        lookback_hours=24,
-        digest_max_messages=30,
+        settings=settings,
         kanban_sync=kb_sync,
-        kanban_provider=KanbanProvider.LOCAL_FILE,
-        kanban_auto_sync=False,
     )
 
     res = uc.execute(run_id="digest-run", pipeline_run_db_id=None, pipeline_stats={"note": "test"})
     assert "Executive summary" in res.markdown
+    assert "Today's action center" in res.markdown
+    assert "Replies needing attention" in res.markdown
+    assert "Waiting on others" in res.markdown
     assert "Critical / High priority messages" in res.markdown
     assert "## Kanban sync" in res.markdown
     assert "Pipeline stats / system notes" in res.markdown
 
 
-def test_digest_yougile_kanban_ops_line(conn) -> None:
+def test_digest_yougile_kanban_ops_line(conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KANBAN_PROVIDER", "yougile")
     clock = FixedClock(datetime(2026, 4, 19, 12, 0, tzinfo=UTC))
     logger = NullLogger()
     messages = SqliteMessageRepository(conn, clock)
@@ -144,16 +152,19 @@ def test_digest_yougile_kanban_ops_line(conn) -> None:
     messages.update_processing_status(mid, MessageProcessingStatus.TRIAGED)
 
     kb_sync = SqliteKanbanSyncRepository(conn, clock)
+    settings = AppSettings(
+        digest_lookback_hours=24,
+        digest_max_messages=30,
+        kanban_provider=KanbanProvider.YOUGILE,
+        kanban_auto_sync=False,
+    )
     uc = BuildMorningDigestUseCase(
         digest_context=digest_ctx,
         digests=digests,
         clock=clock,
         logger=logger,
-        lookback_hours=24,
-        digest_max_messages=30,
+        settings=settings,
         kanban_sync=kb_sync,
-        kanban_provider=KanbanProvider.YOUGILE,
-        kanban_auto_sync=False,
     )
     res = uc.execute(run_id="d-yg", pipeline_run_db_id=None, pipeline_stats={})
     assert "yougile" in res.markdown.lower()

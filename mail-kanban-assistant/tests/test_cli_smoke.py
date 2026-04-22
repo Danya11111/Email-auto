@@ -55,6 +55,14 @@ def test_cli_smoke_init_ingest_triage_extract_digest_review_run_daily(tmp_path: 
     assert runner.invoke(app, ["build-digest", "--out", str(digest_path)], env={**os.environ}).exit_code == 0
     assert digest_path.exists()
 
+    r_ac = runner.invoke(app, ["action-center", "--compact"], env={**os.environ})
+    assert r_ac.exit_code == 0
+    assert "Action center" in r_ac.stdout
+
+    export_path = tmp_path / "ac.md"
+    assert runner.invoke(app, ["action-center-export", "--out", str(export_path)], env={**os.environ}).exit_code == 0
+    assert export_path.exists()
+
     assert runner.invoke(app, ["run-daily"], env={**os.environ}).exit_code == 0
 
 

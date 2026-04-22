@@ -211,11 +211,8 @@ def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, sett
         digests=digests,
         clock=clock,
         logger=logger,
-        lookback_hours=int(settings.digest_lookback_hours),
-        digest_max_messages=int(settings.digest_max_messages),
+        settings=settings,
         kanban_sync=kanban_sync_repo,
-        kanban_provider=settings.kanban_provider,
-        kanban_auto_sync=settings.kanban_auto_sync,
     )
 
     list_reviews_uc = ListPendingReviewsUseCase(reviews=reviews)

@@ -6,12 +6,16 @@ from datetime import UTC, datetime
 from typing import Sequence
 
 from app.application.dtos import (
+    ActionCenterMessageRowDTO,
+    ActionCenterRawBundleDTO,
+    ActionCenterTaskPinDTO,
     DailyDigestContextDTO,
     DailyDigestStatsDTO,
     DigestMessageSnapshotDTO,
     DigestReviewSnapshotDTO,
     DigestTaskSnapshotDTO,
     IncomingMessageDTO,
+    KanbanSyncFailurePinDTO,
     PersistedExtractedTaskDTO,
     PersistedMessageDTO,
     ReviewEnqueueCommandDTO,
@@ -21,6 +25,8 @@ from app.application.dtos import (
 )
 from app.application.ports import ClockPort
 from app.domain.enums import (
+    KanbanProvider,
+    KanbanSyncStatus,
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
@@ -138,6 +144,10 @@ class SqliteMessageRepository:
             (window_start.isoformat(), window_end.isoformat()),
         ).fetchall()
         return [self._to_dto(r) for r in rows]
+
+    def get_message_by_id(self, message_id: int) -> PersistedMessageDTO | None:
+        row = self._conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return self._to_dto(row) if row is not None else None
 
     def update_processing_status(self, message_id: int, status: MessageProcessingStatus) -> None:
         now = self._clock.now().isoformat()
@@ -670,4 +680,162 @@ class SqliteDigestContextRepository:
             messages=tuple(snapshots),
             candidate_tasks=tuple(candidate_tasks),
             pending_reviews=tuple(pending_review_items),
+        )
+
+    def load_action_center_raw_bundle(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        max_message_rows: int,
+        kanban_provider: KanbanProvider,
+    ) -> ActionCenterRawBundleDTO:
+        """Load rows for deterministic action center (thread clustering happens in application engine)."""
+        p = kanban_provider.value
+        start_iso = window_start.isoformat()
+        end_iso = window_end.isoformat()
+
+        approved_ready = int(
+            self._conn.execute(
+                """
+                SELECT COUNT(1) AS c FROM extracted_tasks et
+                WHERE et.status = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM kanban_sync_records k
+                    WHERE k.task_id = et.id AND k.provider = ? AND k.sync_status = ?
+                  )
+                """,
+                (TaskStatus.APPROVED.value, p, KanbanSyncStatus.SYNCED.value),
+            ).fetchone()["c"]
+        )
+        manual_resync = int(
+            self._conn.execute(
+                """
+                SELECT COUNT(1) AS c FROM kanban_sync_records
+                WHERE provider = ? AND sync_status = ? AND last_outbound_action = ?
+                """,
+                (p, KanbanSyncStatus.SYNCED.value, "skip_manual_resync"),
+            ).fetchone()["c"]
+        )
+
+        fail_rows = self._conn.execute(
+            """
+            SELECT id, task_id, provider, last_error
+            FROM kanban_sync_records
+            WHERE provider = ? AND sync_status = ?
+            ORDER BY datetime(COALESCE(last_attempt_at, created_at)) DESC
+            LIMIT 20
+            """,
+            (p, KanbanSyncStatus.FAILED.value),
+        ).fetchall()
+        kanban_failures = tuple(
+            KanbanSyncFailurePinDTO(
+                sync_record_id=int(r["id"]),
+                task_id=int(r["task_id"]),
+                provider=str(r["provider"]),
+                last_error=str(r["last_error"] or ""),
+            )
+            for r in fail_rows
+        )
+
+        msg_rows = self._conn.execute(
+            """
+            SELECT m.id, m.received_at, m.subject, m.sender, m.recipients_json, m.thread_hint,
+                   t.importance AS tr_importance, t.reply_requirement AS tr_reply,
+                   t.summary AS tr_summary, t.actionable AS tr_actionable, t.confidence AS tr_conf
+            FROM messages m
+            LEFT JOIN triage_results t ON t.message_id = m.id
+            WHERE datetime(COALESCE(m.received_at, m.created_at)) >= datetime(?)
+              AND datetime(COALESCE(m.received_at, m.created_at)) < datetime(?)
+            ORDER BY datetime(COALESCE(m.received_at, m.created_at)) DESC
+            LIMIT ?
+            """,
+            (start_iso, end_iso, int(max_message_rows)),
+        ).fetchall()
+
+        ac_messages: list[ActionCenterMessageRowDTO] = []
+        message_ids: list[int] = []
+        for r in msg_rows:
+            mid = int(r["id"])
+            message_ids.append(mid)
+            recipients = tuple(json.loads(r["recipients_json"]))
+            importance = (
+                MessageImportance(str(r["tr_importance"])) if r["tr_importance"] is not None else MessageImportance.MEDIUM
+            )
+            reply_req = ReplyRequirement(str(r["tr_reply"])) if r["tr_reply"] is not None else ReplyRequirement.NO
+            summary = str(r["tr_summary"]) if r["tr_summary"] is not None else "(not triaged)"
+            actionable = bool(r["tr_actionable"]) if r["tr_actionable"] is not None else False
+            triage_conf = float(r["tr_conf"]) if r["tr_conf"] is not None else 0.0
+            ac_messages.append(
+                ActionCenterMessageRowDTO(
+                    message_id=mid,
+                    received_at=_parse_dt(r["received_at"]),
+                    subject=r["subject"],
+                    sender=r["sender"],
+                    recipients=recipients,
+                    thread_hint=r["thread_hint"],
+                    importance=importance,
+                    reply_requirement=reply_req,
+                    actionable=actionable,
+                    triage_summary=summary,
+                    triage_confidence=triage_conf,
+                )
+            )
+
+        task_pins: list[ActionCenterTaskPinDTO] = []
+        if message_ids:
+            placeholders = ",".join("?" for _ in message_ids)
+            task_rows = self._conn.execute(
+                f"""
+                SELECT id, message_id, title, status, confidence, due_at
+                FROM extracted_tasks
+                WHERE message_id IN ({placeholders}) AND status = ?
+                ORDER BY id ASC
+                """,
+                (*message_ids, TaskStatus.CANDIDATE.value),
+            ).fetchall()
+            for tr in task_rows:
+                task_pins.append(
+                    ActionCenterTaskPinDTO(
+                        task_id=int(tr["id"]),
+                        message_id=int(tr["message_id"]),
+                        title=str(tr["title"]),
+                        status=TaskStatus(str(tr["status"])),
+                        confidence=float(tr["confidence"]),
+                        due_at=tr["due_at"],
+                    )
+                )
+
+        review_rows = self._conn.execute(
+            """
+            SELECT id, review_kind, related_message_id, related_task_id, reason_code, reason_text, confidence
+            FROM review_items
+            WHERE status = ?
+            ORDER BY datetime(created_at) ASC
+            LIMIT 200
+            """,
+            (ReviewStatus.PENDING.value,),
+        ).fetchall()
+        pending_review_items = [
+            DigestReviewSnapshotDTO(
+                review_id=int(rr["id"]),
+                review_kind=ReviewKind(str(rr["review_kind"])),
+                message_id=int(rr["related_message_id"]),
+                task_id=int(rr["related_task_id"]) if rr["related_task_id"] is not None else None,
+                reason_code=str(rr["reason_code"]),
+                reason_text=str(rr["reason_text"]),
+                confidence=float(rr["confidence"]),
+            )
+            for rr in review_rows
+        ]
+
+        return ActionCenterRawBundleDTO(
+            window_start=window_start,
+            window_end=window_end,
+            messages=tuple(ac_messages),
+            task_pins=tuple(task_pins),
+            pending_reviews=tuple(pending_review_items),
+            kanban_failures=kanban_failures,
+            approved_ready_to_sync=approved_ready,
+            manual_resync_backlog=manual_resync,
         )

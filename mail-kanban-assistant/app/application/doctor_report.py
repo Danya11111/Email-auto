@@ -205,6 +205,27 @@ class DoctorEnvironmentUseCase:
         elif settings.kanban_provider == KanbanProvider.STUB:
             lines.append(DoctorLineDTO("WARN", "Kanban provider is stub — no external/local cards will be created."))
 
+        lines.append(DoctorLineDTO("OK", f"Action center lookback: {int(settings.action_center_lookback_hours)}h"))
+        lines.append(DoctorLineDTO("OK", f"Action center max items: {int(settings.action_center_max_items)}"))
+        lines.append(DoctorLineDTO("OK", f"Action center max message rows: {int(settings.action_center_max_messages)}"))
+        lines.append(DoctorLineDTO("OK", f"Thread grouping time window: {int(settings.thread_grouping_time_window_hours)}h"))
+        lines.append(DoctorLineDTO("OK", f"Reply overdue threshold: {int(settings.reply_overdue_hours)}h"))
+        lines.append(DoctorLineDTO("OK", f"Reply recommended window: {int(settings.reply_recommended_hours)}h"))
+        lines.append(
+            DoctorLineDTO(
+                "OK" if not settings.action_center_use_llm_executive_summary else "WARN",
+                "ACTION_CENTER_USE_LLM_EXECUTIVE_SUMMARY: "
+                + ("off (default deterministic summary)" if not settings.action_center_use_llm_executive_summary else "on (reserved; still deterministic today)"),
+            )
+        )
+        lines.append(
+            DoctorLineDTO(
+                "OK",
+                "ACTION_CENTER_REQUIRE_REVIEW_FOR_AMBIGUOUS_REPLY: "
+                + ("on" if settings.action_center_require_review_for_ambiguous_reply else "off"),
+            )
+        )
+
         if kanban_port is not None:
             try:
                 ok = kanban_port.healthcheck()

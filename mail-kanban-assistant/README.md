@@ -49,6 +49,7 @@ Details:
 - `docs/adr/0004-kanban-sync-outbox.md`
 - `docs/adr/0005-yougile-kanban-provider.md`
 - `docs/adr/0006-yougile-onboarding-cli.md`
+- `docs/adr/0007-thread-aware-action-center.md`
 
 ## LM Studio setup on a weak Mac (practical)
 
@@ -161,6 +162,32 @@ mail-assistant review-export --out ./data/pending_reviews.json
 - **Triage review reject**: deletes triage and moves the message back to `ingested` for a future re-triage run.
 - **Task review approve/reject**: updates extracted task status (`approved` / `rejected`).
 
+### 6b) Action Center (thread-aware daily queue)
+
+The **Action Center** is a deterministic application-layer rollup over a SQLite lookback window:
+
+- **Thread clustering**: use `thread_hint` when present; otherwise normalized subject + primary sender + a bounded time window (see `THREAD_GROUPING_TIME_WINDOW_HOURS`). Heuristics are **best-effort** and intentionally conservative (no giant fuzzy merge across unrelated senders).
+- **Signals**: triage importance / reply requirement / actionable flags, candidate tasks, pending reviews, Kanban approved-ready counts, failed sync rows, manual-resync backlog.
+- **Reply posture (`ReplyState`)**: rule-based combination of max reply requirement, actionable flags, message age vs `REPLY_OVERDUE_HOURS` / `REPLY_RECOMMENDED_HOURS`, and optional review-driven ambiguity (`ACTION_CENTER_REQUIRE_REVIEW_FOR_AMBIGUOUS_REPLY`). This is **operational guidance**, not a guarantee about real-world obligations.
+- **Low-memory default**: no extra LLM calls; `ACTION_CENTER_USE_LLM_EXECUTIVE_SUMMARY` is reserved and stays **false** by default.
+
+Useful commands:
+
+```bash
+mail-assistant action-center
+mail-assistant action-center --compact --json
+mail-assistant action-center-export --out ./data/action-center.md
+mail-assistant explain-message --message-id 12
+mail-assistant explain-thread --thread-id "t-heur-..."
+mail-assistant explain-action-item --item-id "ac:thread:..."
+mail-assistant build-digest --compact --include-informational --json-out ./data/digest.json
+mail-assistant kanban-status --with-work-hints
+```
+
+Morning digest now leads with **Executive summary** (deterministic bullets from the Action Center snapshot) and **Today’s action center**, then reply / waiting / Kanban / review sections.
+
+See `docs/adr/0007-thread-aware-action-center.md`.
+
 ### 7) Digest
 
 Write digest to disk and print it:
@@ -169,7 +196,7 @@ Write digest to disk and print it:
 mail-assistant build-digest --out ./data/digest.md
 ```
 
-The digest includes a short **Kanban sync** section when the DB has sync state (counts by status, recent errors).
+The digest includes **Action Center** sections (thread-aggregated), **Kanban sync** (counts, failures, manual resync hints when applicable), and per-message fallbacks for triage-only views.
 
 ### Normal daily flow (local-first, YouGile-ready)
 
@@ -180,7 +207,8 @@ The digest includes a short **Kanban sync** section when the DB has sync state (
 5. **`kanban-preview`** — dry plan (creates vs updates vs skips).
 6. **`kanban-sync`** (optionally `--dry-run`, `--changed-only`, `--no-include-resync`) or **`kanban-resync-changed`** for fingerprint drift on already-synced rows.
 7. **`kanban-status`** (and **`kanban-show-task-sync --task-id …`** for one task).
-8. **`build-digest`** — includes compact Kanban / YouGile ops lines when wired.
+8. **`build-digest`** — Action Center first, then Kanban / YouGile ops lines when wired.
+9. **`action-center` / `explain-*`** — optional drill-down for debugging ranking and reply heuristics.
 
 **Source of truth:** the local SQLite pipeline (`extracted_tasks`, `kanban_sync_records`, fingerprints). YouGile is a **projection**, not bidirectional SOT.
 

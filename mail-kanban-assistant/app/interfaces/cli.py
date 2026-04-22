@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sys
-import dataclasses
+from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import typer
 
+from app.application.action_center_engine import build_action_center_snapshot
+from app.application.action_center_explain import (
+    count_reply_critical_items,
+    explain_action_item_lines,
+    explain_message_lines,
+    explain_thread_lines,
+    find_action_item,
+    find_thread_summary_for_message,
+    snapshot_lite_from_summary,
+)
+from app.application.digest_markdown import compose_action_center_markdown_export
 from app.application.doctor_report import DoctorEnvironmentUseCase, DoctorReportDTO
+from app.application.dtos import DailyDigestContextDTO, DailyDigestStatsDTO
 from app.application.launchd_plist import LaunchdPlistSpecDTO, render_launchd_plist_xml
 from app.application.policies import TaskAutomationPolicy
 from app.application.use_cases import IngestMessagesUseCase
@@ -40,7 +53,7 @@ from app.infrastructure.http.http_probe import UrllibHttpProbe
 from app.infrastructure.logging.logger import StructuredLoggerAdapter
 from app.infrastructure.mail.eml_reader import EmlDirectoryReader
 from app.infrastructure.mail.mbox_reader import MboxFileReader
-from app.infrastructure.storage.repositories import SqlitePipelineRunRepository, SqliteTaskRepository
+from app.infrastructure.storage.repositories import SqliteDigestContextRepository, SqlitePipelineRunRepository, SqliteTaskRepository
 from app.infrastructure.storage.sqlite_db import open_connection
 from app.infrastructure.storage.sqlite_kanban_sync_repository import SqliteKanbanSyncRepository
 from app.infrastructure.kanban.factory import make_kanban_port
@@ -53,6 +66,31 @@ def _parse_kanban_provider(value: Optional[str], default: KanbanProvider) -> Kan
     if value is None or str(value).strip() == "":
         return default
     return KanbanProvider(str(value).strip().lower())
+
+
+def _load_action_center_snapshot(settings: AppSettings, conn, clock: SystemClock):
+    """Build action center from SQLite (same rules as morning digest)."""
+    end = clock.now()
+    start = end - timedelta(hours=int(settings.action_center_lookback_hours))
+    digest_ctx = SqliteDigestContextRepository(conn)
+    bundle = digest_ctx.load_action_center_raw_bundle(
+        window_start=start,
+        window_end=end,
+        max_message_rows=int(settings.action_center_max_messages),
+        kanban_provider=settings.kanban_provider,
+    )
+    kb_sync = SqliteKanbanSyncRepository(conn, clock)
+    kb = kb_sync.load_kanban_digest_section(
+        provider=settings.kanban_provider,
+        auto_sync_enabled=settings.kanban_auto_sync,
+    )
+    bundle = bundle.model_copy(
+        update={
+            "approved_ready_to_sync": kb.approved_ready_to_sync,
+            "manual_resync_backlog": kb.manual_resync_pending,
+        }
+    )
+    return build_action_center_snapshot(bundle, settings=settings, now=end), bundle
 
 
 @app.callback()
@@ -158,6 +196,17 @@ def extract_tasks() -> None:
 @app.command("build-digest")
 def build_digest(
     out: Path | None = typer.Option(None, "--out", help="Optional path to write digest markdown."),
+    compact: bool = typer.Option(False, "--compact", help="Shorter digest lists."),
+    include_informational: bool = typer.Option(
+        False,
+        "--include-informational",
+        help="Include informational-only action center bucket when present.",
+    ),
+    json_out: Path | None = typer.Option(
+        None,
+        "--json-out",
+        help="Write run_id, digest_id, markdown JSON to this path (stdout may omit markdown when set).",
+    ),
 ) -> None:
     settings = AppSettings()
     conn = open_connection(settings.database_path)
@@ -166,11 +215,165 @@ def build_digest(
     w = build_wiring(conn, clock, logger, settings)
     run_id = new_run_id()
     try:
-        res = w.digest_uc.execute(run_id=run_id, pipeline_run_db_id=None, pipeline_stats=None)
+        res = w.digest_uc.execute(
+            run_id=run_id,
+            pipeline_run_db_id=None,
+            pipeline_stats=None,
+            compact=compact,
+            include_informational=include_informational,
+        )
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(
+                json.dumps({"run_id": run_id, "digest_id": res.digest_id, "markdown": res.markdown}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         if out is not None:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(res.markdown, encoding="utf-8")
-        typer.echo(res.markdown)
+        if json_out is None and out is None:
+            typer.echo(res.markdown)
+        else:
+            if out is not None:
+                typer.echo(f"wrote digest markdown: {out.resolve()}")
+            if json_out is not None:
+                typer.echo(f"wrote digest json: {json_out.resolve()}")
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("action-center")
+def action_center_cmd(
+    compact: bool = typer.Option(False, "--compact", help="Fewer lines per category."),
+    as_json: bool = typer.Option(False, "--json", help="Emit snapshot JSON."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        snap, _bundle = _load_action_center_snapshot(settings, conn, clock)
+        if as_json:
+            typer.echo(json.dumps(snap.model_dump(mode="json"), ensure_ascii=False, indent=2))
+            return
+        typer.echo(f"Action center (items capped by ACTION_CENTER_MAX_ITEMS={settings.action_center_max_items})")
+        cap = 5 if compact else 12
+        for sec in snap.category_sections:
+            typer.echo("")
+            typer.echo(f"## {sec.category.value}")
+            for it in sec.items[:cap]:
+                rs = f" reply={it.reply_state.value}" if it.reply_state else ""
+                typer.echo(f"- {it.item_id} score={it.priority_score}{rs}")
+                typer.echo(f"    {it.title}")
+                typer.echo(f"    why: {it.reason}")
+                typer.echo(f"    next: {it.recommended_next_step}")
+            if len(sec.items) > cap:
+                typer.echo(f"  … {len(sec.items) - cap} more")
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("action-center-export")
+def action_center_export_cmd(
+    out: Path = typer.Option(..., "--out", help="Path to write action center markdown."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        snap, bundle = _load_action_center_snapshot(settings, conn, clock)
+        ctx = DailyDigestContextDTO(
+            window_start=bundle.window_start,
+            window_end=bundle.window_end,
+            stats=DailyDigestStatsDTO(
+                messages_in_window=0,
+                messages_capped=0,
+                pending_reviews=0,
+                candidate_tasks=0,
+            ),
+            messages=(),
+            candidate_tasks=(),
+            pending_reviews=(),
+            action_center=snap,
+        )
+        text = compose_action_center_markdown_export(ctx=ctx)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        typer.echo(f"wrote {out.resolve()}")
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("explain-message")
+def explain_message_cmd(
+    message_id: int = typer.Option(..., "--message-id", min=1),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        msg = w.messages.get_message_by_id(message_id)
+        if msg is None:
+            typer.echo(f"No message m{message_id}", err=True)
+            raise typer.Exit(code=1)
+        triage = w.triage_repo.get_triage(message_id)
+        snap, _b = _load_action_center_snapshot(settings, conn, clock)
+        summary = find_thread_summary_for_message(snap, message_id)
+        lite = snapshot_lite_from_summary(summary) if summary is not None else None
+        for line in explain_message_lines(message_id=message_id, triage=triage, snapshot=lite):
+            typer.echo(line)
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("explain-thread")
+def explain_thread_cmd(
+    thread_id: str = typer.Option(..., "--thread-id", help="Thread id from action-center / digest (e.g. t-hint:... or t-heur-...)."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        snap, _b = _load_action_center_snapshot(settings, conn, clock)
+        summary = next((t for t in snap.threads if t.thread_id == thread_id), None)
+        if summary is None:
+            typer.echo(f"Thread not in current action-center window: {thread_id!r}", err=True)
+            raise typer.Exit(code=1)
+        for line in explain_thread_lines(summary=summary):
+            typer.echo(line)
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("explain-action-item")
+def explain_action_item_cmd(
+    item_id: str = typer.Option(..., "--item-id", help="Item id from action-center (e.g. ac:thread:...)."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        snap, _b = _load_action_center_snapshot(settings, conn, clock)
+        item = find_action_item(snap, item_id)
+        if item is None:
+            typer.echo(f"Action item not found in current window: {item_id!r}", err=True)
+            raise typer.Exit(code=1)
+        for line in explain_action_item_lines(item=item):
+            typer.echo(line)
     finally:
         w.llm.close()
         conn.close()
@@ -477,6 +680,11 @@ def kanban_status_cmd(
         help="For YouGile: run a few live GET checks (boards/column) when API key is set.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON summary."),
+    with_work_hints: bool = typer.Option(
+        False,
+        "--with-work-hints",
+        help="Run a local action-center snapshot and print reply/critical counts (extra SQLite work).",
+    ),
 ) -> None:
     settings = AppSettings()
     conn = open_connection(settings.database_path)
@@ -518,6 +726,13 @@ def kanban_status_cmd(
             typer.echo("  probe: skipped (only meaningful for KANBAN_PROVIDER=yougile)")
         for err in st.last_errors:
             typer.echo(f"  err: {err[:300]}")
+        if with_work_hints:
+            snap, _b = _load_action_center_snapshot(settings, conn, clock)
+            crit = count_reply_critical_items(snap)
+            typer.echo(
+                f"  work_hints: action_center_items={len(snap.items)} reply_or_critical_bucket≈{crit} "
+                f"(see `action-center` / README; window={settings.action_center_lookback_hours}h)"
+            )
     conn.close()
 
 

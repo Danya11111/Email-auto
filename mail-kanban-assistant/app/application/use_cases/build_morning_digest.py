@@ -4,10 +4,12 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 
+from app.application.action_center_engine import build_action_center_snapshot, build_executive_summary_lines
+from app.application.digest_compose_options import DigestComposeOptions
 from app.application.digest_markdown import compose_daily_digest_markdown
 from app.application.dtos import DigestBuildResultDTO
 from app.application.ports import ClockPort, DigestContextPort, KanbanSyncRepositoryPort, LoggerPort, MorningDigestRepositoryPort
-from app.domain.enums import KanbanProvider
+from app.config import AppSettings
 from app.domain.models import MorningDigest
 
 
@@ -17,11 +19,8 @@ class BuildMorningDigestUseCase:
     digests: MorningDigestRepositoryPort
     clock: ClockPort
     logger: LoggerPort
-    lookback_hours: int
-    digest_max_messages: int
+    settings: AppSettings
     kanban_sync: KanbanSyncRepositoryPort | None = None
-    kanban_provider: KanbanProvider = KanbanProvider.LOCAL_FILE
-    kanban_auto_sync: bool = False
 
     def execute(
         self,
@@ -29,24 +28,63 @@ class BuildMorningDigestUseCase:
         run_id: str,
         pipeline_run_db_id: int | None = None,
         pipeline_stats: dict[str, object] | None = None,
+        compact: bool = False,
+        include_informational: bool = False,
     ) -> DigestBuildResultDTO:
         started = time.perf_counter()
         self.logger.info("digest.start", run_id=run_id)
 
         end = self.clock.now()
-        start = end - timedelta(hours=self.lookback_hours)
+        start = end - timedelta(hours=int(self.settings.digest_lookback_hours))
         ctx = self.digest_context.load_daily_digest_context(
             window_start=start,
             window_end=end,
-            max_messages=self.digest_max_messages,
+            max_messages=int(self.settings.digest_max_messages),
         )
+        kb = None
         if self.kanban_sync is not None:
             kb = self.kanban_sync.load_kanban_digest_section(
-                provider=self.kanban_provider,
-                auto_sync_enabled=self.kanban_auto_sync,
+                provider=self.settings.kanban_provider,
+                auto_sync_enabled=self.settings.kanban_auto_sync,
             )
             ctx = ctx.model_copy(update={"kanban": kb})
-        markdown = compose_daily_digest_markdown(ctx=ctx, pipeline_notes=pipeline_stats or {})
+
+        ac_start = end - timedelta(hours=int(self.settings.action_center_lookback_hours))
+        bundle = self.digest_context.load_action_center_raw_bundle(
+            window_start=ac_start,
+            window_end=end,
+            max_message_rows=int(self.settings.action_center_max_messages),
+            kanban_provider=self.settings.kanban_provider,
+        )
+        if kb is not None:
+            bundle = bundle.model_copy(
+                update={
+                    "approved_ready_to_sync": kb.approved_ready_to_sync,
+                    "manual_resync_backlog": kb.manual_resync_pending,
+                }
+            )
+        snapshot = build_action_center_snapshot(bundle, settings=self.settings, now=end)
+        stats_line = (
+            f"Action center window {ac_start.isoformat()} → {end.isoformat()}: "
+            f"threads={len(snapshot.threads)} items={len(snapshot.items)}"
+        )
+        max_exec = int(self.settings.action_center_executive_summary_max_items)
+        exec_lines = build_executive_summary_lines(snapshot, stats_line=stats_line, max_items=max_exec)
+        if self.settings.action_center_use_llm_executive_summary:
+            # Reserved: optional tiny structured LLM summary; deterministic path stays default (low-memory).
+            pass
+        ctx = ctx.model_copy(
+            update={
+                "action_center": snapshot,
+                "executive_summary_lines": exec_lines,
+            }
+        )
+
+        digest_opts = DigestComposeOptions(
+            compact=compact,
+            include_informational=include_informational or bool(self.settings.action_center_include_informational),
+        )
+        markdown = compose_daily_digest_markdown(ctx=ctx, pipeline_notes=pipeline_stats or {}, options=digest_opts)
         digest = MorningDigest(window_start=start, window_end=end, markdown=markdown)
         digest_id = self.digests.save_digest(pipeline_run_id=pipeline_run_db_id, digest=digest)
 
@@ -57,5 +95,6 @@ class BuildMorningDigestUseCase:
             duration_ms=duration_ms,
             messages=len(ctx.messages),
             digest_id=digest_id,
+            action_center_items=len(snapshot.items),
         )
         return DigestBuildResultDTO(run_id=run_id, digest_id=digest_id, markdown=digest.markdown)
