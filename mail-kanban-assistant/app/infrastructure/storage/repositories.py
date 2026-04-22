@@ -149,6 +149,21 @@ class SqliteMessageRepository:
         row = self._conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
         return self._to_dto(row) if row is not None else None
 
+    def list_messages_by_ids(self, message_ids: Sequence[int]) -> Sequence[PersistedMessageDTO]:
+        ids = tuple(int(x) for x in message_ids)
+        if not ids:
+            return ()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM messages
+            WHERE id IN ({placeholders})
+            ORDER BY datetime(COALESCE(received_at, created_at)) ASC, id ASC
+            """,
+            ids,
+        ).fetchall()
+        return tuple(self._to_dto(r) for r in rows)
+
     def update_processing_status(self, message_id: int, status: MessageProcessingStatus) -> None:
         now = self._clock.now().isoformat()
         self._conn.execute(
@@ -363,6 +378,36 @@ class SqliteTaskRepository:
         ).fetchall()
         return tuple(self._row_to_kanban_context(r) for r in rows)
 
+    def list_tasks_for_message_ids(self, message_ids: Sequence[int]) -> Sequence[PersistedExtractedTaskDTO]:
+        ids = tuple(int(x) for x in message_ids)
+        if not ids:
+            return ()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, message_id, title, description, due_at, confidence, status, dedupe_key, created_at
+            FROM extracted_tasks
+            WHERE message_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            ids,
+        ).fetchall()
+        out: list[PersistedExtractedTaskDTO] = []
+        for r in rows:
+            out.append(
+                PersistedExtractedTaskDTO(
+                    id=int(r["id"]),
+                    message_id=int(r["message_id"]),
+                    title=str(r["title"]),
+                    description=r["description"],
+                    due_at=_parse_dt(r["due_at"]) if r["due_at"] else None,
+                    confidence=float(r["confidence"]),
+                    status=TaskStatus(str(r["status"])),
+                    dedupe_key=str(r["dedupe_key"]),
+                )
+            )
+        return tuple(out)
+
 
 class SqliteMorningDigestRepository:
     def __init__(self, conn: sqlite3.Connection, clock: ClockPort) -> None:
@@ -534,6 +579,21 @@ class SqliteReviewRepository:
             (ReviewStatus.REJECTED.value, now, decided_by, note, review_id, ReviewStatus.PENDING.value),
         )
         self._conn.commit()
+
+    def list_pending_for_message_ids(self, message_ids: Sequence[int]) -> Sequence[ReviewListItemDTO]:
+        ids = tuple(int(x) for x in message_ids)
+        if not ids:
+            return ()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM review_items
+            WHERE status = ? AND related_message_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            (ReviewStatus.PENDING.value, *ids),
+        ).fetchall()
+        return tuple(self._to_list_item(r) for r in rows)
 
     def _to_list_item(self, row: sqlite3.Row) -> ReviewListItemDTO:
         return ReviewListItemDTO(

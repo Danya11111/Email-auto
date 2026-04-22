@@ -109,6 +109,44 @@ def upgrade_schema(conn: sqlite3.Connection) -> None:
 
     _upgrade_kanban_sync_audit_columns(conn)
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reply_drafts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          thread_id TEXT NOT NULL,
+          primary_message_id INTEGER NOT NULL,
+          related_action_item_id TEXT,
+          status TEXT NOT NULL,
+          tone TEXT NOT NULL,
+          subject_suggestion TEXT NOT NULL,
+          body_text TEXT NOT NULL,
+          opening_line TEXT NOT NULL DEFAULT '',
+          closing_line TEXT NOT NULL DEFAULT '',
+          short_rationale TEXT NOT NULL,
+          key_points_json TEXT NOT NULL,
+          missing_information_json TEXT NOT NULL DEFAULT '[]',
+          confidence REAL NOT NULL DEFAULT 0,
+          source_message_ids_json TEXT NOT NULL,
+          source_task_ids_json TEXT NOT NULL,
+          source_review_ids_json TEXT NOT NULL,
+          generated_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          approved_at TEXT,
+          rejected_at TEXT,
+          exported_at TEXT,
+          generation_fingerprint TEXT NOT NULL,
+          model_name TEXT,
+          generation_mode TEXT NOT NULL,
+          fact_boundary_note TEXT NOT NULL,
+          user_note TEXT,
+          FOREIGN KEY(primary_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reply_drafts_thread ON reply_drafts(thread_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reply_drafts_status ON reply_drafts(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reply_drafts_fingerprint ON reply_drafts(thread_id, generation_fingerprint)")
+
     conn.commit()
 
 

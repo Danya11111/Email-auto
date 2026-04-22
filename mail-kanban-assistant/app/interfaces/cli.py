@@ -11,7 +11,15 @@ from typing import Optional
 
 import typer
 
-from app.application.action_center_engine import build_action_center_snapshot
+from app.application.llm_input import LlmTextPolicy
+from app.application.reply_context_builder import SqliteReplyContextBuilder
+from app.application.reply_draft_action_center_wiring import build_action_center_snapshot_with_reply_pins
+from app.application.reply_draft_explain import explain_reply_draft_lines
+from app.application.reply_draft_export_files import LocalReplyDraftExporter, default_export_path
+from app.application.reply_draft_policy import assert_regenerate_preconditions
+from app.application.reply_thread_resolution import infer_reply_state_for_thread, resolve_thread_message_ids
+from app.application.use_cases.reply_draft_generate import GenerateReplyDraftUseCase
+from app.application.use_cases.reply_draft_lifecycle import ApproveReplyDraftUseCase, ExportReplyDraftUseCase, RejectReplyDraftUseCase
 from app.application.action_center_explain import (
     count_reply_critical_items,
     explain_action_item_lines,
@@ -22,7 +30,7 @@ from app.application.action_center_explain import (
     snapshot_lite_from_summary,
 )
 from app.application.digest_markdown import compose_action_center_markdown_export
-from app.application.doctor_report import DoctorEnvironmentUseCase, DoctorReportDTO
+from app.application.doctor_report import DoctorEnvironmentUseCase, DoctorLineDTO, DoctorReportDTO
 from app.application.dtos import DailyDigestContextDTO, DailyDigestStatsDTO
 from app.application.launchd_plist import LaunchdPlistSpecDTO, render_launchd_plist_xml
 from app.application.policies import TaskAutomationPolicy
@@ -46,14 +54,23 @@ from app.bootstrap import (
     run_daily,
 )
 from app.config import AppSettings
-from app.domain.enums import KanbanProvider
+from app.domain.enums import KanbanProvider, ReplyTone
+from app.domain.reply_draft_errors import ReplyDraftError
 from app.infrastructure.clock import SystemClock
 from app.infrastructure.fs.maildrop_filesystem import OsMaildropFilesystem
 from app.infrastructure.http.http_probe import UrllibHttpProbe
 from app.infrastructure.logging.logger import StructuredLoggerAdapter
 from app.infrastructure.mail.eml_reader import EmlDirectoryReader
 from app.infrastructure.mail.mbox_reader import MboxFileReader
-from app.infrastructure.storage.repositories import SqliteDigestContextRepository, SqlitePipelineRunRepository, SqliteTaskRepository
+from app.infrastructure.storage.repositories import (
+    SqliteDigestContextRepository,
+    SqliteMessageRepository,
+    SqlitePipelineRunRepository,
+    SqliteReviewRepository,
+    SqliteTaskRepository,
+    SqliteTriageRepository,
+)
+from app.infrastructure.storage.sqlite_reply_draft_repository import SqliteReplyDraftRepository
 from app.infrastructure.storage.sqlite_db import open_connection
 from app.infrastructure.storage.sqlite_kanban_sync_repository import SqliteKanbanSyncRepository
 from app.infrastructure.kanban.factory import make_kanban_port
@@ -68,8 +85,16 @@ def _parse_kanban_provider(value: Optional[str], default: KanbanProvider) -> Kan
     return KanbanProvider(str(value).strip().lower())
 
 
-def _load_action_center_snapshot(settings: AppSettings, conn, clock: SystemClock):
-    """Build action center from SQLite (same rules as morning digest)."""
+def _parse_reply_tone(value: Optional[str], default: ReplyTone) -> ReplyTone:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        return ReplyTone(str(value).strip().lower())
+    except ValueError as exc:
+        raise typer.BadParameter(f"unknown tone: {value!r}") from exc
+
+
+def _reply_draft_bundle(settings: AppSettings, conn, clock: SystemClock):
     end = clock.now()
     start = end - timedelta(hours=int(settings.action_center_lookback_hours))
     digest_ctx = SqliteDigestContextRepository(conn)
@@ -84,13 +109,47 @@ def _load_action_center_snapshot(settings: AppSettings, conn, clock: SystemClock
         provider=settings.kanban_provider,
         auto_sync_enabled=settings.kanban_auto_sync,
     )
-    bundle = bundle.model_copy(
+    return bundle.model_copy(
         update={
             "approved_ready_to_sync": kb.approved_ready_to_sync,
             "manual_resync_backlog": kb.manual_resync_pending,
         }
     )
-    return build_action_center_snapshot(bundle, settings=settings, now=end), bundle
+
+
+def _make_reply_draft_generate_uc(
+    conn,
+    clock: SystemClock,
+    logger: StructuredLoggerAdapter,
+    settings: AppSettings,
+    llm,
+) -> GenerateReplyDraftUseCase:
+    messages = SqliteMessageRepository(conn, clock)
+    tasks = SqliteTaskRepository(conn, clock)
+    reviews = SqliteReviewRepository(conn, clock)
+    triage = SqliteTriageRepository(conn, clock)
+    policy = LlmTextPolicy(
+        max_input_chars=int(settings.llm_max_input_chars),
+        truncate_strategy=settings.message_body_truncate_strategy,
+    )
+    builder = SqliteReplyContextBuilder(
+        messages=messages,
+        tasks=tasks,
+        reviews=reviews,
+        triage_get=triage.get_triage,
+        settings=settings,
+        llm_text_policy=policy,
+    )
+    drafts = SqliteReplyDraftRepository(conn, clock)
+    return GenerateReplyDraftUseCase(drafts=drafts, llm=llm, builder=builder, clock=clock, logger=logger, settings=settings)
+
+
+def _load_action_center_snapshot(settings: AppSettings, conn, clock: SystemClock):
+    """Build action center from SQLite (same rules as morning digest)."""
+    end = clock.now()
+    bundle = _reply_draft_bundle(settings, conn, clock)
+    snap, _pins = build_action_center_snapshot_with_reply_pins(conn, clock, settings, bundle, end)
+    return snap, bundle
 
 
 @app.callback()
@@ -530,6 +589,44 @@ def doctor_cmd(
     uc = DoctorEnvironmentUseCase(http=UrllibHttpProbe())
     report = uc.execute(settings, repo_root=rr, wrapper_script=wr, kanban_port=make_kanban_port(settings, log))
     lines = list(report.lines)
+    try:
+        export_dir = settings.reply_draft_export_dir.resolve()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        probe = export_dir / ".doctor_probe"
+        probe.write_text("ok", encoding="utf-8")
+        lines.append(DoctorLineDTO("OK", f"REPLY_DRAFT_EXPORT_DIR writable: {export_dir}"))
+    except OSError as exc:
+        lines.append(DoctorLineDTO("WARN", f"REPLY_DRAFT_EXPORT_DIR not ready ({settings.reply_draft_export_dir}): {exc}"))
+    lines.append(
+        DoctorLineDTO(
+            "OK",
+            "Reply draft LLM: uses same LM Studio gateway as triage/tasks (on-demand `reply-draft-generate` only).",
+        )
+    )
+    lines.append(
+        DoctorLineDTO(
+            "OK",
+            f"REPLY_DRAFT_REQUIRE_APPROVAL_BEFORE_EXPORT={'on' if settings.reply_draft_require_approval_before_export else 'off'}",
+        )
+    )
+    lines.append(DoctorLineDTO("OK", f"REPLY_DRAFT_MARK_STALE_ON_THREAD_CHANGE={'on' if settings.reply_draft_mark_stale_on_thread_change else 'off'}"))
+    lines.append(DoctorLineDTO("OK", f"REPLY_DRAFT_DEFAULT_TONE={settings.reply_draft_default_tone!r}"))
+    if settings.database_path.exists():
+        conn = open_connection(settings.database_path)
+        try:
+            dr = SqliteReplyDraftRepository(conn, SystemClock())
+            counts = dr.count_by_status()
+            ready = int(counts.get("generated", 0))
+            stale = int(counts.get("stale", 0))
+            appr = int(counts.get("approved", 0))
+            lines.append(
+                DoctorLineDTO(
+                    "OK",
+                    f"Reply draft DB snapshot: generated={ready} stale={stale} approved={appr} (full map: {counts!r})",
+                )
+            )
+        finally:
+            conn.close()
     if yougile_probe and settings.yougile_api_key.strip():
         lines.extend(run_yougile_deep_doctor(settings, log))
     merged = DoctorReportDTO(lines=tuple(lines))
@@ -934,6 +1031,264 @@ def install_launchd_cmd(
         typer.echo(f"  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{settings.launchd_label}.plist")
     else:
         typer.echo("Note: launchctl steps above apply to macOS only.")
+
+
+def _default_reply_tone(settings: AppSettings) -> ReplyTone:
+    try:
+        return ReplyTone(str(settings.reply_draft_default_tone))
+    except ValueError:
+        return ReplyTone.NEUTRAL
+
+
+@app.command("reply-draft-generate")
+def reply_draft_generate_cmd(
+    thread_id: str = typer.Option(..., "--thread-id", help="Thread id from action-center (e.g. t-hint-…)."),
+    tone: Optional[str] = typer.Option(None, "--tone", help="neutral|warm|concise|formal|direct"),
+    force: bool = typer.Option(False, "--force", help="Override conservative reply_state blocks."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        bundle = _reply_draft_bundle(settings, conn, clock)
+        uc = _make_reply_draft_generate_uc(conn, clock, logger, settings, w.llm)
+        tone_e = _parse_reply_tone(tone, _default_reply_tone(settings))
+        res = uc.execute(
+            run_id=new_run_id(),
+            thread_id=thread_id,
+            bundle=bundle,
+            tone=tone_e,
+            force=force,
+            explicit_regenerate=False,
+        )
+        typer.echo(
+            f"reply-draft-generate: draft_id={res.draft_id} reused_without_llm={res.reused_without_llm} "
+            f"fingerprint={res.generation_fingerprint[:16]}… mode={res.generation_mode.value} "
+            f"subject={res.subject_suggestion[:120]!r}"
+        )
+    except ReplyDraftError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("reply-draft-list")
+def reply_draft_list_cmd(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by reply draft status."),
+    thread_id: Optional[str] = typer.Option(None, "--thread-id"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    repo = SqliteReplyDraftRepository(conn, clock)
+    rows = repo.list_reply_drafts(status=status, thread_id=thread_id, limit=200)
+    if as_json:
+        typer.echo(json.dumps([dataclasses.asdict(r) for r in rows], default=str, ensure_ascii=False, indent=2))
+        conn.close()
+        return
+    if not rows:
+        typer.echo("(no reply drafts)")
+    for r in rows:
+        typer.echo(f"d{r.id} thread={r.thread_id} status={r.status.value} fp={r.generation_fingerprint[:12]}… subject={r.subject_suggestion[:80]!r}")
+    conn.close()
+
+
+@app.command("reply-draft-show")
+def reply_draft_show_cmd(
+    draft_id: int = typer.Option(..., "--draft-id", min=1),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    repo = SqliteReplyDraftRepository(conn, clock)
+    d = repo.get_reply_draft(draft_id)
+    if d is None:
+        typer.echo(f"draft {draft_id} not found", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Subject: {d.subject_suggestion}")
+    typer.echo(f"Status: {d.status.value} tone={d.tone.value} mode={d.generation_mode.value}")
+    typer.echo(f"Stale vs thread: compare fingerprint {d.generation_fingerprint[:16]}… to current context (reply-draft-explain).")
+    typer.echo("")
+    typer.echo("Body:")
+    typer.echo(d.body_text)
+    typer.echo("")
+    typer.echo("Rationale:")
+    typer.echo(d.short_rationale)
+    typer.echo("")
+    typer.echo("Missing information:")
+    for x in d.missing_information:
+        typer.echo(f"- {x}")
+    if not d.missing_information:
+        typer.echo("- (none)")
+    conn.close()
+
+
+@app.command("reply-draft-approve")
+def reply_draft_approve_cmd(
+    draft_id: int = typer.Option(..., "--draft-id", min=1),
+    note: Optional[str] = typer.Option(None, "--note"),
+    decided_by: str = typer.Option("cli", "--by"),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    repo = SqliteReplyDraftRepository(conn, clock)
+    uc = ApproveReplyDraftUseCase(drafts=repo, clock=clock)
+    try:
+        uc.execute(draft_id, decided_by=decided_by, note=note)
+        typer.echo(f"approved d{draft_id}")
+    except ReplyDraftError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+
+@app.command("reply-draft-reject")
+def reply_draft_reject_cmd(
+    draft_id: int = typer.Option(..., "--draft-id", min=1),
+    note: Optional[str] = typer.Option(None, "--note"),
+    decided_by: str = typer.Option("cli", "--by"),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    repo = SqliteReplyDraftRepository(conn, clock)
+    uc = RejectReplyDraftUseCase(drafts=repo, clock=clock)
+    try:
+        uc.execute(draft_id, decided_by=decided_by, note=note)
+        typer.echo(f"rejected d{draft_id}")
+    except ReplyDraftError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+
+@app.command("reply-draft-regenerate")
+def reply_draft_regenerate_cmd(
+    draft_id: int = typer.Option(..., "--draft-id", min=1),
+    tone: Optional[str] = typer.Option(None, "--tone"),
+    force: bool = typer.Option(False, "--force", help="Required to regenerate approved/exported drafts."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    logger = StructuredLoggerAdapter()
+    w = build_wiring(conn, clock, logger, settings)
+    try:
+        repo = SqliteReplyDraftRepository(conn, clock)
+        d = repo.get_reply_draft(draft_id)
+        if d is None:
+            typer.echo(f"draft {draft_id} not found", err=True)
+            raise typer.Exit(code=1)
+        assert_regenerate_preconditions(d, force=force)
+        repo.mark_reply_draft_stale(draft_id, now_iso=clock.now().isoformat())
+        bundle = _reply_draft_bundle(settings, conn, clock)
+        uc = _make_reply_draft_generate_uc(conn, clock, logger, settings, w.llm)
+        tone_e = _parse_reply_tone(tone, d.tone)
+        res = uc.execute(
+            run_id=new_run_id(),
+            thread_id=d.thread_id,
+            bundle=bundle,
+            tone=tone_e,
+            force=True,
+            explicit_regenerate=True,
+        )
+        typer.echo(
+            f"reply-draft-regenerate: new_draft_id={res.draft_id} reused_without_llm={res.reused_without_llm} "
+            f"subject={res.subject_suggestion[:120]!r}"
+        )
+    except ReplyDraftError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        w.llm.close()
+        conn.close()
+
+
+@app.command("reply-draft-export")
+def reply_draft_export_cmd(
+    draft_id: int = typer.Option(..., "--draft-id", min=1),
+    out: Optional[Path] = typer.Option(None, "--out", help="Output file path."),
+    as_markdown: bool = typer.Option(True, "--markdown/--plain", help="Export markdown (default) or plain text."),
+) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    repo = SqliteReplyDraftRepository(conn, clock)
+    exporter = LocalReplyDraftExporter()
+    uc = ExportReplyDraftUseCase(drafts=repo, exporter=exporter, clock=clock, settings=settings)
+    d = repo.get_reply_draft(draft_id)
+    if d is None:
+        typer.echo(f"draft {draft_id} not found", err=True)
+        raise typer.Exit(code=1)
+    suffix = "md" if as_markdown else "txt"
+    path = out or default_export_path(export_dir=settings.reply_draft_export_dir, draft=d, suffix=suffix)
+    try:
+        written = uc.execute(draft_id, out_path=path, as_markdown=as_markdown)
+        typer.echo(f"exported to {written.resolve()}")
+    except ReplyDraftError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+
+@app.command("reply-draft-explain")
+def reply_draft_explain_cmd(draft_id: int = typer.Option(..., "--draft-id", min=1)) -> None:
+    settings = AppSettings()
+    conn = open_connection(settings.database_path)
+    clock = SystemClock()
+    repo = SqliteReplyDraftRepository(conn, clock)
+    d = repo.get_reply_draft(draft_id)
+    if d is None:
+        typer.echo(f"draft {draft_id} not found", err=True)
+        raise typer.Exit(code=1)
+    messages = SqliteMessageRepository(conn, clock)
+    tasks = SqliteTaskRepository(conn, clock)
+    reviews = SqliteReviewRepository(conn, clock)
+    triage = SqliteTriageRepository(conn, clock)
+    policy = LlmTextPolicy(
+        max_input_chars=int(settings.llm_max_input_chars),
+        truncate_strategy=settings.message_body_truncate_strategy,
+    )
+    builder = SqliteReplyContextBuilder(
+        messages=messages,
+        tasks=tasks,
+        reviews=reviews,
+        triage_get=triage.get_triage,
+        settings=settings,
+        llm_text_policy=policy,
+    )
+    bundle = _reply_draft_bundle(settings, conn, clock)
+    end = clock.now()
+    rs = infer_reply_state_for_thread(bundle, settings=settings, now=end, thread_id=d.thread_id)
+    step = None
+    snap, _ = _load_action_center_snapshot(settings, conn, clock)
+    for it in snap.items:
+        if it.thread_id == d.thread_id and it.source_type == "thread":
+            step = it.recommended_next_step
+            break
+    try:
+        mids = resolve_thread_message_ids(bundle, settings=settings, now=end, thread_id=d.thread_id)
+    except ReplyDraftError:
+        mids = d.source_message_ids
+    ctx = builder.build_for_thread(
+        thread_id=d.thread_id,
+        message_ids=mids,
+        primary_message_id=d.primary_message_id,
+        reply_state=rs,
+        action_center_next_step=step,
+    )
+    for line in explain_reply_draft_lines(draft=d, context=ctx):
+        typer.echo(line)
+    conn.close()
 
 
 @app.command("run-daily")

@@ -10,7 +10,8 @@ from app.application.dtos import (
     TaskExtractionItemDTO,
     TriageLLMResponseDTO,
 )
-from app.application.ports import ClockPort, DigestLLMPort, LoggerPort, MessageReaderPort, TaskExtractionLLMPort, TriageLLMPort
+from app.application.dtos import ReplyDraftStructuredLLMItemDTO
+from app.application.ports import ClockPort, DigestLLMPort, LoggerPort, MessageReaderPort, ReplyDraftLLMPort, TaskExtractionLLMPort, TriageLLMPort
 from app.domain.enums import MessageImportance, ReplyRequirement
 
 
@@ -68,6 +69,32 @@ class FakeTaskLLM(TaskExtractionLLMPort):
     def extract_tasks(self, message: PersistedMessageDTO, triage_summary: str) -> Sequence[TaskExtractionItemDTO]:
         self.calls.append((message, triage_summary))
         return tuple(self.tasks)
+
+
+class FakeReplyDraftLLM(ReplyDraftLLMPort):
+    def __init__(self, item: ReplyDraftStructuredLLMItemDTO | None = None) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.item = item or ReplyDraftStructuredLLMItemDTO(
+            subject_suggestion="Re: follow-up",
+            opening_line="Hi,",
+            core_points=("Ack request",),
+            closing_line="Thanks,",
+            body_text="Hi,\n\nAck request.\n\nThanks,",
+            short_rationale="Based on triage summary only.",
+            missing_information=("Exact deadline if any",),
+            confidence=0.55,
+            fact_boundary_note="Do not confirm dates not in context.",
+        )
+
+    def generate_reply_draft_structured(
+        self,
+        *,
+        context_json: str,
+        tone: str,
+        reply_state: str,
+    ) -> ReplyDraftStructuredLLMItemDTO:
+        self.calls.append((context_json[:80], tone, reply_state))
+        return self.item
 
 
 class FakeDigestLLM(DigestLLMPort):

@@ -129,3 +129,35 @@ class ActionCenterCategory(StrEnum):
     WAITING_OR_BLOCKED = "waiting_or_blocked"
     REVIEW_REQUIRED = "review_required"
     INFORMATIONAL = "informational"
+
+
+class ReplyDraftStatus(StrEnum):
+    GENERATED = "generated"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPORTED = "exported"
+    STALE = "stale"
+
+
+class ReplyTone(StrEnum):
+    NEUTRAL = "neutral"
+    WARM = "warm"
+    CONCISE = "concise"
+    FORMAL = "formal"
+    DIRECT = "direct"
+
+
+class ReplyDraftGenerationMode(StrEnum):
+    INITIAL = "initial"
+    REGENERATE = "regenerate"
+    REFRESH_AFTER_THREAD_CHANGE = "refresh_after_thread_change"
+
+
+class ReplyDraftWorkflowHint(StrEnum):
+    """Single-thread Action Center hint for reply draft human-in-the-loop."""
+
+    NONE = "none"
+    MISSING = "missing"
+    STALE = "stale"
+    READY_REVIEW = "ready_review"
+    APPROVED_NOT_EXPORTED = "approved_not_exported"

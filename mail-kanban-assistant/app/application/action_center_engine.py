@@ -9,6 +9,7 @@ from app.application.dtos import (
     ActionCenterTaskPinDTO,
     DailyActionItemDTO,
     MessageThreadSummaryDTO,
+    ReplyDraftThreadPinDTO,
 )
 from app.application.reply_state_rules import infer_reply_state, max_importance, max_reply_requirement
 from app.application.thread_action_state_rules import infer_thread_action_state
@@ -90,6 +91,7 @@ def build_action_center_snapshot(
     *,
     settings: AppSettings,
     now: datetime,
+    reply_draft_pins: dict[str, ReplyDraftThreadPinDTO] | None = None,
 ) -> ActionCenterSnapshotDTO:
     window_td = timedelta(hours=float(settings.thread_grouping_time_window_hours))
     clusters = cluster_messages_into_threads(bundle.messages, time_window=window_td)
@@ -208,7 +210,10 @@ def build_action_center_snapshot(
         )
         if cat is None:
             continue
+        pin = (reply_draft_pins or {}).get(tid)
         score = score_thread_item(summary=summary, reply_state=rs)
+        if pin is not None and pin.workflow in ("missing", "stale"):
+            score += 8
         reason = f"{rs.value}; triage reply≤{rep.value}; tasks={len(cand_tasks)}; reviews={len(rev_ids)}"
         step = "Run review-list / triage inbox or reply in mail client."
         if rev_ids:
@@ -217,6 +222,24 @@ def build_action_center_snapshot(
             step = f"Approve candidate tasks: {', '.join(f't{t}' for t in cand_tasks[:5])}"
         elif rs in (ReplyState.WAITING_FOR_US, ReplyState.OVERDUE_FOR_US):
             step = "Draft a reply (reply requirement indicates you owe a response)."
+        rd_id: int | None = None
+        rd_wf: str | None = None
+        item_signals = list(summary.signals)
+        if pin is not None and pin.workflow != "none":
+            rd_wf = pin.workflow
+            rd_id = pin.latest_draft_id
+            item_signals.append(f"reply_draft_workflow={pin.workflow}")
+            if pin.workflow == "missing":
+                step = f"Generate local reply draft: reply-draft-generate --thread-id {tid}"
+            elif pin.workflow == "ready_review" and pin.latest_draft_id is not None:
+                step = f"Review reply draft d{pin.latest_draft_id}: reply-draft-show --draft-id {pin.latest_draft_id}"
+            elif pin.workflow == "stale" and pin.latest_draft_id is not None:
+                step = (
+                    f"Reply draft stale vs current thread; regenerate: "
+                    f"reply-draft-regenerate --draft-id {pin.latest_draft_id} --force"
+                )
+            elif pin.workflow == "approved_not_exported" and pin.latest_draft_id is not None:
+                step = f"Export approved draft: reply-draft-export --draft-id {pin.latest_draft_id} --out ./export.md"
         items.append(
             DailyActionItemDTO(
                 item_id=f"ac:thread:{tid}",
@@ -229,7 +252,9 @@ def build_action_center_snapshot(
                 thread_id=tid,
                 message_ids=summary.related_message_ids,
                 reply_state=rs,
-                signals=tuple(signals),
+                signals=tuple(item_signals),
+                reply_draft_id=rd_id,
+                reply_draft_workflow=rd_wf,
             )
         )
 
@@ -325,10 +350,15 @@ def build_action_center_snapshot(
 
 
 def build_executive_summary_lines(
-    snapshot: ActionCenterSnapshotDTO, *, stats_line: str, max_items: int = 4
+    snapshot: ActionCenterSnapshotDTO,
+    *,
+    stats_line: str,
+    max_items: int = 4,
+    reply_draft_preamble: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """Deterministic executive bullets (no LLM)."""
     lines: list[str] = [stats_line]
+    lines.extend(reply_draft_preamble)
     top = snapshot.items[: max(1, int(max_items))]
     if not top:
         lines.append("No high-priority action center items in this window.")

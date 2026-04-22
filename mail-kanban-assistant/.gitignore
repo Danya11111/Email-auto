@@ -17,3 +17,5 @@ data/*.sqlite
 !data/.gitkeep
 # Local Kanban board output (KANBAN_ROOT_DIR default)
 data/kanban/
+# Default reply draft exports (REPLY_DRAFT_EXPORT_DIR)
+data/reply_drafts_export/

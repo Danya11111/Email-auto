@@ -234,6 +234,7 @@ def test_digest_includes_kanban_section(conn, tmp_path: Path, monkeypatch: pytes
         logger=logger,
         settings=settings,
         kanban_sync=kb_sync,
+        reply_draft_action_center=None,
     )
     res = uc.execute(run_id="dg", pipeline_run_db_id=None, pipeline_stats={})
     assert "## Kanban sync" in res.markdown

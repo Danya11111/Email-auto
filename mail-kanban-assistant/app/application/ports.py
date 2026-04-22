@@ -6,6 +6,7 @@ from typing import Protocol, Sequence
 
 from app.application.dtos import (
     ActionCenterRawBundleDTO,
+    ActionCenterSnapshotDTO,
     DailyDigestContextDTO,
     DigestLLMResponseDTO,
     IngestedArtifactRecordDTO,
@@ -13,16 +14,22 @@ from app.application.dtos import (
     KanbanDigestSectionDTO,
     KanbanStatusSummaryDTO,
     KanbanSyncRecordRowDTO,
+    PersistedExtractedTaskDTO,
     PersistedMessageDTO,
+    ReplyDraftContextDTO,
+    ReplyDraftCreateCommandDTO,
+    ReplyDraftThreadPinDTO,
     ReviewEnqueueCommandDTO,
     ReviewListItemDTO,
+    ReplyDraftStructuredLLMItemDTO,
     SavedCandidateTaskDTO,
     TaskExtractionItemDTO,
     TaskKanbanSourceContextDTO,
     TriageLLMResponseDTO,
 )
-from app.domain.enums import KanbanProvider, MessageProcessingStatus, ReviewKind, TaskStatus
+from app.domain.enums import KanbanProvider, MessageProcessingStatus, ReplyState, ReviewKind, TaskStatus
 from app.domain.models import ExtractedTask, KanbanCardDraft, KanbanProviderCreateResult, MorningDigest, TriageResult
+from app.domain.reply_draft import ReplyDraft
 
 
 class MessageReaderPort(Protocol):
@@ -57,6 +64,9 @@ class MessageRepositoryPort(Protocol):
         ...
 
     def update_processing_status(self, message_id: int, status: MessageProcessingStatus) -> None:
+        ...
+
+    def list_messages_by_ids(self, message_ids: Sequence[int]) -> Sequence[PersistedMessageDTO]:
         ...
 
 
@@ -108,6 +118,9 @@ class TaskRepositoryPort(Protocol):
         ...
 
     def list_approved_tasks_for_kanban(self, limit: int) -> Sequence[TaskKanbanSourceContextDTO]:
+        ...
+
+    def list_tasks_for_message_ids(self, message_ids: Sequence[int]) -> Sequence[PersistedExtractedTaskDTO]:
         ...
 
 
@@ -229,6 +242,9 @@ class ReviewRepositoryPort(Protocol):
     def reject(self, review_id: int, *, decided_by: str, note: str | None) -> None:
         ...
 
+    def list_pending_for_message_ids(self, message_ids: Sequence[int]) -> Sequence[ReviewListItemDTO]:
+        ...
+
 
 class DigestContextPort(Protocol):
     def load_daily_digest_context(
@@ -297,4 +313,87 @@ class MaildropFilesystemPort(Protocol):
 class HttpProbePort(Protocol):
     def get_status(self, url: str, *, timeout_seconds: float) -> int | None:
         """Return HTTP status code, or None if the request did not complete."""
+        ...
+
+
+class ReplyDraftRepositoryPort(Protocol):
+    def insert_reply_draft(self, cmd: ReplyDraftCreateCommandDTO, *, created_at_iso: str, updated_at_iso: str) -> int:
+        """Insert draft row; returns id."""
+
+    def get_reply_draft(self, draft_id: int) -> ReplyDraft | None:
+        ...
+
+    def list_reply_drafts(
+        self,
+        *,
+        status: str | None = None,
+        thread_id: str | None = None,
+        limit: int = 200,
+    ) -> Sequence[ReplyDraft]:
+        ...
+
+    def find_latest_for_thread(self, thread_id: str) -> ReplyDraft | None:
+        ...
+
+    def mark_reply_draft_approved(self, draft_id: int, *, decided_by: str, note: str | None, now_iso: str) -> None:
+        ...
+
+    def mark_reply_draft_rejected(self, draft_id: int, *, decided_by: str, note: str | None, now_iso: str) -> None:
+        ...
+
+    def mark_reply_draft_exported(self, draft_id: int, *, now_iso: str) -> None:
+        ...
+
+    def mark_reply_draft_stale(self, draft_id: int, *, now_iso: str) -> None:
+        ...
+
+    def mark_thread_drafts_stale_except(
+        self, thread_id: str, *, except_draft_id: int | None, now_iso: str
+    ) -> int:
+        """Returns rows updated."""
+
+    def maybe_find_same_fingerprint_draft(self, thread_id: str, fingerprint: str) -> ReplyDraft | None:
+        ...
+
+    def count_by_status(self) -> dict[str, int]:
+        ...
+
+
+class ReplyDraftLLMPort(Protocol):
+    def generate_reply_draft_structured(
+        self,
+        *,
+        context_json: str,
+        tone: str,
+        reply_state: str,
+    ) -> ReplyDraftStructuredLLMItemDTO:
+        ...
+
+
+class ReplyContextBuilderPort(Protocol):
+    def build_for_thread(
+        self,
+        *,
+        thread_id: str,
+        message_ids: Sequence[int],
+        primary_message_id: int | None,
+        reply_state: ReplyState,
+        action_center_next_step: str | None,
+    ) -> ReplyDraftContextDTO:
+        ...
+
+
+class ReplyDraftExporterPort(Protocol):
+    def export_markdown(self, *, draft: ReplyDraft, path: Path) -> Path:
+        ...
+
+    def export_plain_text(self, *, draft: ReplyDraft, path: Path) -> Path:
+        ...
+
+
+class ReplyDraftActionCenterEnricherPort(Protocol):
+    def enrich_snapshot(
+        self, bundle: ActionCenterRawBundleDTO, now: datetime
+    ) -> tuple[ActionCenterSnapshotDTO, dict[str, ReplyDraftThreadPinDTO]]:
+        """Rebuild action center snapshot with reply-draft pins (SQLite-backed)."""
         ...

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
 
-from app.application.dtos import DigestLLMResponseDTO, TriageLLMResponseDTO
+from app.application.dtos import DigestLLMResponseDTO, ReplyDraftStructuredLLMItemDTO, TriageLLMResponseDTO
 from app.domain.enums import MessageImportance, ReplyRequirement
+from app.infrastructure.clock import SystemClock
 from app.interfaces.cli import app
 
 
@@ -30,12 +32,28 @@ class _FakeLmStudio:
         _ = (window_start, window_end, payload_json)
         return DigestLLMResponseDTO(markdown="# unused\n")
 
+    def generate_reply_draft_structured(self, *, context_json: str, tone: str, reply_state: str):  # noqa: ANN001
+        _ = (context_json, tone, reply_state)
+        return ReplyDraftStructuredLLMItemDTO(
+            subject_suggestion="Re: explain-test",
+            opening_line="Hi,",
+            core_points=("Ack.",),
+            closing_line="Thanks,",
+            body_text="Hi,\n\nAck.\n\nThanks,",
+            short_rationale="Stub.",
+            missing_information=(),
+            confidence=0.5,
+            fact_boundary_note="Stub.",
+        )
+
     def close(self) -> None:
         return None
 
 
 def test_cli_explain_message_thread_action_item(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("app.bootstrap.make_lm_studio_client", lambda settings, logger: _FakeLmStudio())
+    fixed_now = datetime(2026, 4, 22, 15, 0, tzinfo=UTC)
+    monkeypatch.setattr(SystemClock, "now", lambda self: fixed_now)
 
     db_path = tmp_path / "explain.sqlite3"
     monkeypatch.setenv("DATABASE_PATH", str(db_path))
@@ -47,7 +65,7 @@ def test_cli_explain_message_thread_action_item(tmp_path: Path, monkeypatch) -> 
         "To: bob@test.com\n"
         "Subject: Contract follow-up\n"
         "Message-ID: <cli-explain-1@test>\n"
-        "Date: Mon, 19 Apr 2026 12:00:00 +0000\n"
+        "Date: Mon, 19 Apr 2026 20:00:00 +0000\n"
         "MIME-Version: 1.0\n"
         "Content-Type: text/plain; charset=utf-8\n"
         "\n"

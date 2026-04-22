@@ -8,11 +8,17 @@ from typing import Any, Sequence, TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from app.application.dtos import DigestLLMResponseDTO, PersistedMessageDTO, TaskExtractionItemDTO, TriageLLMResponseDTO
+from app.application.dtos import (
+    DigestLLMResponseDTO,
+    PersistedMessageDTO,
+    ReplyDraftStructuredLLMItemDTO,
+    TaskExtractionItemDTO,
+    TriageLLMResponseDTO,
+)
 from app.application.llm_input import LlmTextPolicy, prepare_body_for_llm
-from app.application.ports import DigestLLMPort, LoggerPort, TaskExtractionLLMPort, TriageLLMPort
+from app.application.ports import DigestLLMPort, LoggerPort, ReplyDraftLLMPort, TaskExtractionLLMPort, TriageLLMPort
 from app.infrastructure.llm import prompts
-from app.infrastructure.llm.schemas import DigestStructuredResponse, TaskExtractionStructuredResponse
+from app.infrastructure.llm.schemas import DigestStructuredResponse, ReplyDraftStructuredResponse, TaskExtractionStructuredResponse
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -25,7 +31,7 @@ class LlmResponseValidationError(RuntimeError):
     ...
 
 
-class LmStudioStructuredClient(TriageLLMPort, TaskExtractionLLMPort, DigestLLMPort):
+class LmStudioStructuredClient(TriageLLMPort, TaskExtractionLLMPort, DigestLLMPort, ReplyDraftLLMPort):
     """OpenAI-compatible LM Studio gateway with structured JSON validation."""
 
     def __init__(
@@ -76,6 +82,32 @@ class LmStudioStructuredClient(TriageLLMPort, TaskExtractionLLMPort, DigestLLMPo
             response_model=TaskExtractionStructuredResponse,
         )
         return tuple(parsed.tasks)
+
+    def generate_reply_draft_structured(
+        self,
+        *,
+        context_json: str,
+        tone: str,
+        reply_state: str,
+    ) -> ReplyDraftStructuredLLMItemDTO:
+        user = prompts.reply_draft_user_prompt(context_json=context_json, tone=tone, reply_state=reply_state)
+        parsed = self._complete_and_validate(
+            schema_name="reply_draft",
+            system=prompts.REPLY_DRAFT_SYSTEM,
+            user=user,
+            response_model=ReplyDraftStructuredResponse,
+        )
+        return ReplyDraftStructuredLLMItemDTO(
+            subject_suggestion=parsed.subject_suggestion.strip(),
+            opening_line=(parsed.opening_line or "").strip(),
+            core_points=tuple(str(x).strip() for x in parsed.core_points if str(x).strip()),
+            closing_line=(parsed.closing_line or "").strip(),
+            body_text=parsed.body_text.strip(),
+            short_rationale=(parsed.short_rationale or "").strip(),
+            missing_information=tuple(str(x).strip() for x in parsed.missing_information if str(x).strip()),
+            confidence=float(parsed.confidence or 0.0),
+            fact_boundary_note=(parsed.fact_boundary_note or "").strip(),
+        )
 
     def build_digest_markdown(self, window_start: datetime, window_end: datetime, payload_json: str) -> DigestLLMResponseDTO:
         _ = (window_start, window_end)

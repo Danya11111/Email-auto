@@ -22,6 +22,7 @@ from app.application.use_cases.kanban_sync import (
     ShowKanbanTaskSyncUseCase,
     SyncApprovedTasksToKanbanUseCase,
 )
+from app.application.reply_draft_action_center_wiring import SqliteReplyDraftActionCenterEnricher
 from app.application.use_cases.process_apple_mail_drop import ProcessAppleMailDropUseCase
 from app.application.use_cases.approve_review_item import ApproveReviewItemUseCase
 from app.application.use_cases.enqueue_review_items import EnqueueReviewItemsUseCase
@@ -213,6 +214,7 @@ def build_wiring(conn, clock: SystemClock, logger: StructuredLoggerAdapter, sett
         logger=logger,
         settings=settings,
         kanban_sync=kanban_sync_repo,
+        reply_draft_action_center=SqliteReplyDraftActionCenterEnricher(conn=conn, clock=clock, settings=settings),
     )
 
     list_reviews_uc = ListPendingReviewsUseCase(reviews=reviews)

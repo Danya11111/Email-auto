@@ -50,6 +50,7 @@ Details:
 - `docs/adr/0005-yougile-kanban-provider.md`
 - `docs/adr/0006-yougile-onboarding-cli.md`
 - `docs/adr/0007-thread-aware-action-center.md`
+- `docs/adr/0008-reply-draft-human-in-loop-layer.md`
 
 ## LM Studio setup on a weak Mac (practical)
 
@@ -187,6 +188,51 @@ mail-assistant kanban-status --with-work-hints
 Morning digest now leads with **Executive summary** (deterministic bullets from the Action Center snapshot) and **Today’s action center**, then reply / waiting / Kanban / review sections.
 
 See `docs/adr/0007-thread-aware-action-center.md`.
+
+### 6c) Reply Draft Center (human-in-the-loop, never sends mail)
+
+The assistant already infers **when a reply is likely owed** (`ReplyState` + Action Center). The **Reply Draft Center** adds a **separate local artifact**: a structured **reply draft** you can review, approve, reject, and **export** for copy-paste into Apple Mail (or any client). There is **no SMTP / IMAP / Mail.app send path** and **no auto-send**.
+
+**How the system decides “reply work”**
+
+- Same deterministic inputs as Action Center: triage reply requirements, thread clustering, candidate tasks, pending reviews, and `ReplyState` (`waiting_for_us`, `overdue_for_us`, `reply_recommended_today`, etc.).
+- **Draft generation is never automatic for all mail**: it runs only when you invoke `reply-draft-generate` / `reply-draft-regenerate`, or when you explicitly wire a future batch (not included in MVP beyond CLI).
+
+**What goes into draft generation (bounded + auditable)**
+
+- A compact **reply context pack** (`ReplyDraftContextDTO`): normalized subject, capped recent thread excerpts, primary triage summary, optional task bullets / pending review notes / Action Center “next step” line, explicit “safe facts” vs “unknown” lists.
+- Limits: `REPLY_DRAFT_MAX_CONTEXT_MESSAGES`, `REPLY_DRAFT_MAX_INPUT_CHARS`, plus toggles `REPLY_DRAFT_INCLUDE_*` (see `.env.example`).
+- The LM Studio gateway calls a **single structured JSON schema** (`reply_draft`) with short system instructions: conservative wording, explicit `missing_information`, and a `fact_boundary_note`.
+
+**Stale drafts (deterministic)**
+
+- Each draft stores a `generation_fingerprint` hash of **thread shape + triage pins + included ids** (not raw bodies). When the thread changes, the fingerprint drifts; Action Center / digest surface **stale** / **missing draft** hints, and `REPLY_DRAFT_MARK_STALE_ON_THREAD_CHANGE=true` can mark `generated` rows **stale** in SQLite during digest/action-center refresh.
+
+**Workflow (CLI)**
+
+```bash
+mail-assistant reply-draft-generate --thread-id "t-hint-..."
+mail-assistant reply-draft-list
+mail-assistant reply-draft-show --draft-id 3
+mail-assistant reply-draft-explain --draft-id 3
+mail-assistant reply-draft-approve --draft-id 3 --note "LGTM"
+mail-assistant reply-draft-export --draft-id 3 --out ./data/out.md
+# or plain text:
+mail-assistant reply-draft-export --draft-id 3 --plain --out ./data/out.txt
+mail-assistant reply-draft-reject --draft-id 3 --note "Wrong tone"
+mail-assistant reply-draft-regenerate --draft-id 3 --force
+```
+
+**Export & approval default**
+
+- `REPLY_DRAFT_REQUIRE_APPROVAL_BEFORE_EXPORT=true` (default) means **export is blocked until approve** (safe human gate). Set to `false` only if you accept exporting `generated` drafts without an explicit approval step.
+
+**Action Center + digest**
+
+- Thread items gain **one** consolidated `reply_draft_workflow` hint (`missing` / `ready_review` / `stale` / `approved_not_exported`) and an updated **Next** line pointing at the right CLI command.
+- Morning digest adds a compact **Reply draft workload** section when there is anything to show, plus an executive-summary bullet when counts are non-zero.
+
+See `docs/adr/0008-reply-draft-human-in-loop-layer.md`.
 
 ### 7) Digest
 

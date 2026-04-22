@@ -8,7 +8,15 @@ from app.application.action_center_engine import build_action_center_snapshot, b
 from app.application.digest_compose_options import DigestComposeOptions
 from app.application.digest_markdown import compose_daily_digest_markdown
 from app.application.dtos import DigestBuildResultDTO
-from app.application.ports import ClockPort, DigestContextPort, KanbanSyncRepositoryPort, LoggerPort, MorningDigestRepositoryPort
+from app.application.ports import (
+    ClockPort,
+    DigestContextPort,
+    KanbanSyncRepositoryPort,
+    LoggerPort,
+    MorningDigestRepositoryPort,
+    ReplyDraftActionCenterEnricherPort,
+)
+from app.application.reply_draft_pins import build_reply_draft_digest_section, executive_reply_draft_bullets
 from app.config import AppSettings
 from app.domain.models import MorningDigest
 
@@ -21,6 +29,7 @@ class BuildMorningDigestUseCase:
     logger: LoggerPort
     settings: AppSettings
     kanban_sync: KanbanSyncRepositoryPort | None = None
+    reply_draft_action_center: ReplyDraftActionCenterEnricherPort | None = None
 
     def execute(
         self,
@@ -63,13 +72,22 @@ class BuildMorningDigestUseCase:
                     "manual_resync_backlog": kb.manual_resync_pending,
                 }
             )
-        snapshot = build_action_center_snapshot(bundle, settings=self.settings, now=end)
+        if self.reply_draft_action_center is not None:
+            snapshot, pins = self.reply_draft_action_center.enrich_snapshot(bundle, end)
+            digest_rd = build_reply_draft_digest_section(snapshot=snapshot, pins=pins)
+            rd_preamble = executive_reply_draft_bullets(pins)
+        else:
+            snapshot = build_action_center_snapshot(bundle, settings=self.settings, now=end, reply_draft_pins=None)
+            digest_rd = None
+            rd_preamble = ()
         stats_line = (
             f"Action center window {ac_start.isoformat()} → {end.isoformat()}: "
             f"threads={len(snapshot.threads)} items={len(snapshot.items)}"
         )
         max_exec = int(self.settings.action_center_executive_summary_max_items)
-        exec_lines = build_executive_summary_lines(snapshot, stats_line=stats_line, max_items=max_exec)
+        exec_lines = build_executive_summary_lines(
+            snapshot, stats_line=stats_line, max_items=max_exec, reply_draft_preamble=rd_preamble
+        )
         if self.settings.action_center_use_llm_executive_summary:
             # Reserved: optional tiny structured LLM summary; deterministic path stays default (low-memory).
             pass
@@ -77,6 +95,7 @@ class BuildMorningDigestUseCase:
             update={
                 "action_center": snapshot,
                 "executive_summary_lines": exec_lines,
+                "reply_draft_digest": digest_rd,
             }
         )
 

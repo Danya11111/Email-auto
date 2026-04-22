@@ -9,7 +9,12 @@ from app.domain.enums import KanbanCardStatus, KanbanProvider, MessageBodyTrunca
 
 
 class AppSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     app_env: str = Field(default="development", validation_alias="APP_ENV")
 
@@ -226,6 +231,64 @@ class AppSettings(BaseSettings):
     )
     @classmethod
     def _bool_action_center_flags(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return value
+
+    reply_draft_max_context_messages: int = Field(default=4, validation_alias="REPLY_DRAFT_MAX_CONTEXT_MESSAGES")
+    reply_draft_max_input_chars: int = Field(default=4500, validation_alias="REPLY_DRAFT_MAX_INPUT_CHARS")
+    reply_draft_default_tone: str = Field(default="neutral", validation_alias="REPLY_DRAFT_DEFAULT_TONE")
+    reply_draft_allow_force_on_no_reply_needed: bool = Field(
+        default=False,
+        validation_alias="REPLY_DRAFT_ALLOW_FORCE_ON_NO_REPLY_NEEDED",
+    )
+    reply_draft_export_dir: Path = Field(default=Path("./data/reply_drafts_export"), validation_alias="REPLY_DRAFT_EXPORT_DIR")
+    reply_draft_mark_stale_on_thread_change: bool = Field(
+        default=True,
+        validation_alias="REPLY_DRAFT_MARK_STALE_ON_THREAD_CHANGE",
+    )
+    reply_draft_require_approval_before_export: bool = Field(
+        default=True,
+        validation_alias="REPLY_DRAFT_REQUIRE_APPROVAL_BEFORE_EXPORT",
+        description="When true, export is blocked until approve (safe human-in-the-loop default).",
+    )
+    reply_draft_include_action_center_reason: bool = Field(
+        default=True,
+        validation_alias="REPLY_DRAFT_INCLUDE_ACTION_CENTER_REASON",
+    )
+    reply_draft_include_tasks: bool = Field(default=True, validation_alias="REPLY_DRAFT_INCLUDE_TASKS")
+    reply_draft_include_review_notes: bool = Field(default=True, validation_alias="REPLY_DRAFT_INCLUDE_REVIEW_NOTES")
+
+    @field_validator("reply_draft_max_context_messages")
+    @classmethod
+    def _reply_draft_ctx_msgs(cls, value: int) -> int:
+        v = int(value)
+        return 1 if v < 1 else (12 if v > 12 else v)
+
+    @field_validator("reply_draft_max_input_chars")
+    @classmethod
+    def _reply_draft_input_chars(cls, value: int) -> int:
+        v = int(value)
+        return 1500 if v < 1500 else (20000 if v > 20000 else v)
+
+    @field_validator("reply_draft_default_tone", mode="before")
+    @classmethod
+    def _reply_draft_tone(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() or "neutral"
+        return value
+
+    @field_validator(
+        "reply_draft_allow_force_on_no_reply_needed",
+        "reply_draft_mark_stale_on_thread_change",
+        "reply_draft_require_approval_before_export",
+        "reply_draft_include_action_center_reason",
+        "reply_draft_include_tasks",
+        "reply_draft_include_review_notes",
+        mode="before",
+    )
+    @classmethod
+    def _bool_reply_draft_flags(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return value

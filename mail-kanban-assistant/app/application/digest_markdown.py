@@ -43,6 +43,30 @@ def compose_daily_digest_markdown(
             lines.append(f"- Reply-sensitive items: **{len(reply_needed)}**")
     lines.append("")
 
+    rd = ctx.reply_draft_digest
+    if rd is not None and (rd.needing_draft or rd.ready_for_review or rd.stale or rd.approved_not_exported):
+        lines.append("## Reply draft workload")
+        if rd.needing_draft:
+            lines.append("### Replies needing draft")
+            for ln in rd.needing_draft[:8]:
+                lines.append(f"- {ln}")
+            lines.append("")
+        if rd.ready_for_review:
+            lines.append("### Reply drafts ready for review")
+            for ln in rd.ready_for_review[:8]:
+                lines.append(f"- {ln}")
+            lines.append("")
+        if rd.stale:
+            lines.append("### Stale reply drafts")
+            for ln in rd.stale[:8]:
+                lines.append(f"- {ln}")
+            lines.append("")
+        if rd.approved_not_exported:
+            lines.append("### Approved replies not yet exported")
+            for ln in rd.approved_not_exported[:8]:
+                lines.append(f"- {ln}")
+            lines.append("")
+
     ac = ctx.action_center
     if ac is not None:
         lines.append("## Today's action center")

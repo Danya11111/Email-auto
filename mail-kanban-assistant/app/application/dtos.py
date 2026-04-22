@@ -13,8 +13,12 @@ from app.domain.enums import (
     MessageImportance,
     MessageProcessingStatus,
     MessageSource,
+    ReplyDraftGenerationMode,
+    ReplyDraftStatus,
+    ReplyTone,
     ReplyRequirement,
     ReplyState,
+    ReplyTone,
     ReviewKind,
     ReviewStatus,
     TaskStatus,
@@ -232,6 +236,8 @@ class DailyActionItemDTO(BaseModel):
     due_at: str | None = None
     reply_state: ReplyState | None = None
     signals: tuple[str, ...] = Field(default_factory=tuple)
+    reply_draft_id: int | None = None
+    reply_draft_workflow: str | None = None
 
 
 class ActionCenterCategorySectionDTO(BaseModel):
@@ -251,6 +257,15 @@ class ActionCenterSnapshotDTO(BaseModel):
     category_sections: tuple[ActionCenterCategorySectionDTO, ...]
 
 
+class ReplyDraftDigestSectionDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    needing_draft: tuple[str, ...] = Field(default_factory=tuple)
+    ready_for_review: tuple[str, ...] = Field(default_factory=tuple)
+    stale: tuple[str, ...] = Field(default_factory=tuple)
+    approved_not_exported: tuple[str, ...] = Field(default_factory=tuple)
+
+
 class DailyDigestContextDTO(BaseModel):
     model_config = {"frozen": True}
 
@@ -263,6 +278,96 @@ class DailyDigestContextDTO(BaseModel):
     kanban: KanbanDigestSectionDTO | None = None
     action_center: ActionCenterSnapshotDTO | None = None
     executive_summary_lines: tuple[str, ...] = Field(default_factory=tuple)
+    reply_draft_digest: ReplyDraftDigestSectionDTO | None = None
+
+
+class ReplyDraftContextMessageDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    message_id: int
+    received_at: datetime | None
+    direction: str
+    sender: str | None
+    subject: str | None
+    body_excerpt: str
+
+
+class ReplyDraftContextDTO(BaseModel):
+    """Compact, bounded payload for structured reply draft generation (auditable)."""
+
+    model_config = {"frozen": True}
+
+    thread_id: str
+    normalized_subject: str
+    reply_state: ReplyState
+    primary_message_id: int
+    latest_inbound_summary: str
+    triage_reply_requirement: ReplyRequirement | None = None
+    triage_importance: MessageImportance | None = None
+    triage_summary_primary: str | None = None
+    messages_included: tuple[ReplyDraftContextMessageDTO, ...] = Field(default_factory=tuple)
+    extracted_task_points: tuple[str, ...] = Field(default_factory=tuple)
+    pending_review_notes: tuple[str, ...] = Field(default_factory=tuple)
+    action_center_next_step: str | None = None
+    deadlines: tuple[str, ...] = Field(default_factory=tuple)
+    safe_facts: tuple[str, ...] = Field(default_factory=tuple)
+    unknown_or_unverified: tuple[str, ...] = Field(default_factory=tuple)
+    context_char_estimate: int = 0
+    source_task_ids: tuple[int, ...] = Field(default_factory=tuple)
+    source_review_ids: tuple[int, ...] = Field(default_factory=tuple)
+
+
+class ReplyDraftThreadPinDTO(BaseModel):
+    """Per-thread reply draft state for Action Center / digest (deterministic)."""
+
+    model_config = {"frozen": True}
+
+    thread_id: str
+    current_fingerprint: str
+    latest_draft_id: int | None = None
+    latest_status: ReplyDraftStatus | None = None
+    stored_fingerprint: str | None = None
+    workflow: str = "none"
+
+
+class ReplyDraftStructuredLLMItemDTO(BaseModel):
+    model_config = {"frozen": True}
+
+    subject_suggestion: str
+    opening_line: str
+    core_points: tuple[str, ...] = Field(default_factory=tuple)
+    closing_line: str
+    body_text: str
+    short_rationale: str
+    missing_information: tuple[str, ...] = Field(default_factory=tuple)
+    confidence: float
+    fact_boundary_note: str
+
+
+class ReplyDraftCreateCommandDTO(BaseModel):
+    model_config = {"frozen": True, "protected_namespaces": ()}
+
+    thread_id: str
+    primary_message_id: int
+    related_action_item_id: str | None
+    status: ReplyDraftStatus
+    tone: ReplyTone
+    subject_suggestion: str
+    body_text: str
+    opening_line: str
+    closing_line: str
+    short_rationale: str
+    key_points: tuple[str, ...]
+    missing_information: tuple[str, ...]
+    confidence: float
+    source_message_ids: tuple[int, ...]
+    source_task_ids: tuple[int, ...]
+    source_review_ids: tuple[int, ...]
+    generation_fingerprint: str
+    model_name: str | None
+    generation_mode: ReplyDraftGenerationMode
+    fact_boundary_note: str
+    user_note: str | None = None
 
 
 class ReviewEnqueueCommandDTO(BaseModel):

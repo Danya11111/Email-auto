@@ -90,6 +90,7 @@ def test_build_digest_persists_and_contains_sections(conn) -> None:
         kanban_auto_sync=False,
     )
     uc = BuildMorningDigestUseCase(
+        reply_draft_action_center=None,
         digest_context=digest_ctx,
         digests=digests,
         clock=clock,
@@ -159,6 +160,7 @@ def test_digest_yougile_kanban_ops_line(conn, monkeypatch: pytest.MonkeyPatch) -
         kanban_auto_sync=False,
     )
     uc = BuildMorningDigestUseCase(
+        reply_draft_action_center=None,
         digest_context=digest_ctx,
         digests=digests,
         clock=clock,

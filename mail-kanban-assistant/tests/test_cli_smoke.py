@@ -5,7 +5,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from app.application.dtos import DigestLLMResponseDTO, TriageLLMResponseDTO
+from app.application.dtos import DigestLLMResponseDTO, ReplyDraftStructuredLLMItemDTO, TriageLLMResponseDTO
 from app.domain.enums import MessageImportance, ReplyRequirement
 from app.interfaces.cli import app
 
@@ -28,6 +28,20 @@ class _FakeLmStudio:
     def build_digest_markdown(self, window_start, window_end, payload_json: str):  # noqa: ANN001
         _ = (window_start, window_end, payload_json)
         return DigestLLMResponseDTO(markdown="# unused\n")
+
+    def generate_reply_draft_structured(self, *, context_json: str, tone: str, reply_state: str):  # noqa: ANN001
+        _ = (context_json, tone, reply_state)
+        return ReplyDraftStructuredLLMItemDTO(
+            subject_suggestion="Re: smoke",
+            opening_line="Hi,",
+            core_points=("Thanks for your note.",),
+            closing_line="Best,",
+            body_text="Hi,\n\nThanks for your note.\n\nBest,",
+            short_rationale="Smoke stub.",
+            missing_information=(),
+            confidence=0.5,
+            fact_boundary_note="Stub output for tests.",
+        )
 
     def close(self) -> None:
         return None
@@ -215,3 +229,13 @@ def test_cli_ingest_apple_mail_drop(tmp_path: Path, monkeypatch) -> None:
     r = runner.invoke(app, ["ingest-apple-mail-drop"], env={**os.environ})
     assert r.exit_code == 0
     assert "ingested=1" in r.stdout
+
+
+def test_cli_reply_draft_list_empty_db(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "rd.sqlite3"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    runner = CliRunner()
+    assert runner.invoke(app, ["init-db"], env={**os.environ}).exit_code == 0
+    r = runner.invoke(app, ["reply-draft-list"], env={**os.environ})
+    assert r.exit_code == 0
+    assert "no reply drafts" in r.stdout.lower()
