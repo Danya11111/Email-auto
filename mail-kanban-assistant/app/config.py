@@ -96,7 +96,11 @@ class AppSettings(BaseSettings):
     yougile_base_url: str = Field(default="https://ru.yougile.com", validation_alias="YOUGILE_BASE_URL")
     yougile_api_key: str = Field(default="", validation_alias="YOUGILE_API_KEY")
     yougile_company_id: str = Field(default="", validation_alias="YOUGILE_COMPANY_ID")
-    yougile_board_id: str = Field(default="", validation_alias="YOUGILE_BOARD_ID")
+    yougile_board_id: str = Field(
+        default="",
+        validation_alias="YOUGILE_BOARD_ID",
+        description="Board id from YouGile; .env.example documents 92f15y2g9ymf on ru.yougile.com for this workspace.",
+    )
     yougile_column_id_todo: str = Field(default="", validation_alias="YOUGILE_COLUMN_ID_TODO")
     yougile_column_id_done: str = Field(default="", validation_alias="YOUGILE_COLUMN_ID_DONE")
     yougile_column_id_blocked: str = Field(default="", validation_alias="YOUGILE_COLUMN_ID_BLOCKED")

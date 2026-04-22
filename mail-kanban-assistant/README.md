@@ -269,7 +269,7 @@ After tasks reach **`approved`** via the review queue, you can push them to a Ka
 
 **Why `local_file` stays the default:** it is zero-network, easy to inspect, and safe for experiments. YouGile is opt-in via `KANBAN_PROVIDER=yougile` once you have an API key and column UUIDs.
 
-**YouGile onboarding (recommended)** — see **§7c** below for discovery, env templates, smoke sync on one task, and troubleshooting. Short path: API key → `yougile-discover` → paste ids into `.env` → `yougile-config-check` → `yougile-smoke-sync --task-id …` (dry-run) → `--execute` once → normal `kanban-sync`.
+**YouGile onboarding (recommended)** — see **§7c** below (and **§7c.1** for the board this repo documents by default). Short path: API key → `yougile-discover` → paste ids into `.env` → `yougile-config-check` → `yougile-smoke-sync --task-id …` (dry-run) → `--execute` once → normal `kanban-sync`.
 
 **Idempotency / fingerprint**
 
@@ -332,6 +332,16 @@ Use these **application-layer** commands (they call YouGile read/write APIs only
 7. **`mail-assistant kanban-status --probe`** — for YouGile, runs a tiny live probe (`/boards`, configured board, TODO column) after the usual SQLite counters.
 8. **`mail-assistant yougile-smoke-sync --task-id <internal id>`** — **dry-run by default** (plans with a smoke tag in title/description). Add **`--execute`** for a **single** approved task write. Requires `KANBAN_PROVIDER=yougile`.
 9. Normal **`mail-assistant kanban-sync`** for batch work after smoke looks good.
+
+### 7c.1) Default example board for this workspace (`ru.yougile.com`)
+
+`.env.example` targets **`YOUGILE_BASE_URL=https://ru.yougile.com`** and **`YOUGILE_BOARD_ID=92f15y2g9ymf`** as the documented local default (board ids are not secrets; still never commit real **`YOUGILE_API_KEY`** values).
+
+- **`YOUGILE_API_KEY`:** after `cp .env.example .env`, open `.env` and set `YOUGILE_API_KEY` to the Bearer token from YouGile (company settings → API). Keep `KANBAN_PROVIDER=local_file` until you finish discovery; onboarding commands still read `YOUGILE_*` from the environment.
+- **`yougile-discover`:** from the project directory, run `mail-assistant yougile-discover` (add `--force` if `KANBAN_PROVIDER` is not `yougile` yet). Use `--json` or `--compact` if you prefer machine-readable or dense output.
+- **`YOUGILE_COLUMN_ID_TODO`:** in the discover output, find the section **Columns … grouped by boardId**, open group **`board 92f15y2g9ymf`**, pick the column you want new tasks in, and copy its **`id`** into `YOUGILE_COLUMN_ID_TODO` in `.env`. Optional: `mail-assistant yougile-print-env --board-id 92f15y2g9ymf --column-todo <that-column-id>` prints a paste-ready fragment (`YOUGILE_API_KEY` is always shown as a placeholder in that output; paste your real key only inside `.env`). With an empty `YOUGILE_BOARD_ID`, `yougile-print-env` / `yougile-config-check` still default the board line to **`92f15y2g9ymf`** so the template matches the `.env.example` in this repository.
+- **`yougile-doctor`:** run `mail-assistant yougile-doctor` once `YOUGILE_API_KEY` is set; fix any `FAIL` lines before syncing.
+- **`yougile-smoke-sync` (one approved task):** approve a task in SQLite (`mail-assistant review-approve …`), set `KANBAN_PROVIDER=yougile`, then run `mail-assistant yougile-smoke-sync --task-id <id>` (dry-run). If the plan looks right, run `mail-assistant yougile-smoke-sync --task-id <id> --execute` once, then use normal `kanban-sync` for batch work.
 
 **Smoke cleanup**
 

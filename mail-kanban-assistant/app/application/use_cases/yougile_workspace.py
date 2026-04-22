@@ -17,6 +17,9 @@ from app.domain.models import KanbanCardDraft
 from app.application.ports import KanbanSyncRepositoryPort, LoggerPort, TaskRepositoryPort
 from app.infrastructure.kanban.yougile_rest_client import YougileRestClient
 
+# Example board for this repository's local onboarding (.env.example, README §7c.1). Not a secret.
+DOCUMENTED_LOCAL_YOUGILE_BOARD_ID = "92f15y2g9ymf"
+
 
 def render_yougile_discovery_text(dto: YougileWorkspaceDiscoveryDTO, *, compact: bool, base_url_for_env: str) -> str:
     if not dto.ok:
@@ -63,8 +66,8 @@ def render_yougile_discovery_text(dto: YougileWorkspaceDiscoveryDTO, *, compact:
 
 
 def build_yougile_env_fragment(settings: AppSettings, *, board_id: str | None, column_todo: str | None) -> str:
-    """Printable .env fragment (may contain placeholders)."""
-    b = (board_id or settings.yougile_board_id or "").strip() or "<YOUGILE_BOARD_ID from discover>"
+    """Printable .env fragment (may contain placeholders). Uses DOCUMENTED_LOCAL_YOUGILE_BOARD_ID when board unset."""
+    b = (board_id or settings.yougile_board_id or "").strip() or DOCUMENTED_LOCAL_YOUGILE_BOARD_ID
     ct = (column_todo or settings.yougile_column_id_todo or "").strip() or "<YOUGILE_COLUMN_ID_TODO from discover>"
     cd = (settings.yougile_column_id_done or "").strip() or ""
     cb = (settings.yougile_column_id_blocked or "").strip() or ""

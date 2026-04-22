@@ -241,7 +241,7 @@ def test_build_env_fragment_contains_keys(monkeypatch: pytest.MonkeyPatch) -> No
 
     text = build_yougile_env_fragment(AppSettings(), board_id=None, column_todo=None)
     assert "KANBAN_PROVIDER=yougile" in text
-    assert "YOUGILE_BOARD_ID=" in text
+    assert "YOUGILE_BOARD_ID=92f15y2g9ymf" in text
 
 
 def test_render_discovery_unknown_payload(monkeypatch: pytest.MonkeyPatch) -> None:
