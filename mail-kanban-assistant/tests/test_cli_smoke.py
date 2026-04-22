@@ -107,6 +107,7 @@ def test_cli_prepare_maildrop_doctor_print_launchd(tmp_path: Path, monkeypatch) 
     )
     assert r2.exit_code == 0
     assert "Label" in r2.stdout
+    assert "MAIL_KANBAN_RUN_LOG" in r2.stdout
 
     out_plist = tmp_path / "agent.plist"
     r3 = runner.invoke(
@@ -125,6 +126,7 @@ def test_cli_prepare_maildrop_doctor_print_launchd(tmp_path: Path, monkeypatch) 
 
 
 def test_cli_doctor_yougile_missing_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "yg_doc.sqlite3"))
     monkeypatch.setenv("KANBAN_PROVIDER", "yougile")
     monkeypatch.delenv("YOUGILE_API_KEY", raising=False)

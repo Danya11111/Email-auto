@@ -16,6 +16,7 @@ class LaunchdPlistSpecDTO:
     hour: int
     minute: int
     maildrop_root: Path | None = None
+    run_log_path: Path | None = None
 
 
 def render_launchd_plist_xml(spec: LaunchdPlistSpecDTO) -> str:
@@ -34,6 +35,8 @@ def render_launchd_plist_xml(spec: LaunchdPlistSpecDTO) -> str:
     }
     if spec.maildrop_root is not None:
         env["MAILDROP_ROOT"] = str(spec.maildrop_root.resolve())
+    if spec.run_log_path is not None:
+        env["MAIL_KANBAN_RUN_LOG"] = str(spec.run_log_path.resolve())
 
     payload: dict[str, object] = {
         "Label": spec.label,

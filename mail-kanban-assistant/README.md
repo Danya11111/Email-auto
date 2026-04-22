@@ -371,6 +371,33 @@ It prints a **compact stdout summary** (counts + ids). Full digest is only print
 mail-assistant run-daily --digest-out ./data/digest.md
 ```
 
+### One-click macOS launcher (Finder)
+
+For a **single double-click** daily run (Terminal opens, workflow runs, digest opens on success), use:
+
+- `scripts/macos/run-mail-assistant.command`
+
+What it does:
+
+- `cd` to the repository root (derived from the script location).
+- Uses the same core runner as **launchd**: `scripts/macos/run-mail-assistant-daily.sh`, which picks **`$MAIL_KANBAN_REPO_ROOT/.venv/bin/python`** unless you override **`MAIL_KANBAN_VENV_PYTHON`**.
+- Writes a timestamped transcript under **`./data/logs/manual-run-*.log`** (and updates **`./data/logs/manual-run-latest.log`** when supported).
+- Runs **`mail-assistant run-daily --digest-out ./data/digest.md`** (via the wrapper).
+- The wrapper performs a **best-effort LM Studio** HTTP check (same URL idea as `doctor`: `LM_STUDIO_BASE_URL` → `…/models`). If the server is down you get a **warning only**; the CLI may still fail later when it needs the LLM.
+- On success, runs **`open ./data/digest.md`** when that file exists.
+
+**Digest location:** by default **`./data/digest.md`**. You can keep older digests as `digest-*.md` in the same folder if you copy them aside.
+
+**Open latest digest only:** double-click **`scripts/macos/open-latest-digest.command`** (newest `digest*.md` under `data/` by mtime).
+
+**If the laptop was off:** nothing runs while it is asleep. The next **manual** double-click or the next **launchd** fire processes backlog **idempotently** (same rules as in [Restart / catch-up behavior](#restart--catch-up-behavior)).
+
+**LM Studio:** start LM Studio, load a model, and keep the local server listening (default **`http://localhost:1234/v1`** in `.env` / `LM_STUDIO_BASE_URL`). Match **`LM_STUDIO_MODEL`** to the loaded model name. Run **`mail-assistant doctor --repo-root "$(pwd)"`** for a fuller check.
+
+**How this relates to launchd:** `mail-assistant print-launchd` / **`install-launchd`** generate a plist whose **`ProgramArguments`** invoke **`/bin/bash`** on **`scripts/macos/run-mail-assistant-daily.sh run-daily`** with **`MAIL_KANBAN_REPO_ROOT`**, **`MAIL_KANBAN_DIGEST_OUT`**, and **`MAIL_KANBAN_RUN_LOG`** (append-only log at **`./data/logs/launchd-daily.log`**). The **`.command`** file is a thin interactive layer around that same shell script; **scheduled** runs skip Finder/`open` and use the plist’s stdout/stderr paths under **`~/Library/Logs/mail-assistant/`** on macOS (see below).
+
+First-time setup on a Mac clone: **`chmod +x scripts/macos/*.command scripts/macos/run-mail-assistant-daily.sh`** if Git did not preserve the executable bit.
+
 ## Tests
 
 ```bash
@@ -388,13 +415,15 @@ mail-assistant print-launchd --repo-root "$(pwd)" --digest-out "$(pwd)/data/dige
 mail-assistant install-launchd --output ~/Library/LaunchAgents/com.local.mailassistant.plist --repo-root "$(pwd)"
 ```
 
-The generated plist runs `scripts/macos/run-mail-assistant-daily.sh`, which executes the venv Python with an explicit working directory (no interactive shell assumptions).
+The generated plist runs **`scripts/macos/run-mail-assistant-daily.sh`**, the same entry point as **`run-mail-assistant.command`**. It executes the venv Python with an explicit working directory (no interactive shell assumptions).
 
 **Wrapper environment variables:**
 
 - `MAIL_KANBAN_REPO_ROOT` (required): repository root
 - `MAIL_KANBAN_VENV_PYTHON` (optional): defaults to `$MAIL_KANBAN_REPO_ROOT/.venv/bin/python`
 - `MAIL_KANBAN_DIGEST_OUT` (optional): digest output path for `run-daily`
+- `MAIL_KANBAN_RUN_LOG` (optional): append this run’s CLI stdout/stderr to this file (set in generated plists to `./data/logs/launchd-daily.log`)
+- `MAIL_KANBAN_PREFLIGHT_LM` (optional): `1` (default) runs a quick LM Studio `…/models` probe before the CLI; set to `0` to skip
 - `MAILDROP_ROOT` (optional): passed through to ingestion defaults
 
 **launchctl (user session agent):**
@@ -428,9 +457,9 @@ Historical reference template: `app/scheduler/launchd/com.local.mailassistant.pl
 
 ## Recommended daily workflow (Mac)
 
-- Keep LM Studio running locally (or accept `doctor` warnings).
+- Keep LM Studio running locally (or accept `doctor` / wrapper preflight warnings).
 - Let automation drop new JSON snapshots into `MAILDROP_ROOT/incoming` throughout the day.
-- On a schedule (launchd) or manually, run `mail-assistant run-daily --digest-out ./data/digest.md`.
+- On a schedule (**launchd**) or manually, run **`mail-assistant run-daily --digest-out ./data/digest.md`**, or double-click **`scripts/macos/run-mail-assistant.command`** for the same pipeline plus log file and digest `open`.
   - This ingests **EML/MBOX (if configured)** **and always attempts the maildrop** (empty `incoming/` is cheap).
   - If the machine slept: the next run processes the accumulated backlog idempotently.
 

@@ -573,7 +573,10 @@ def doctor_cmd(
     wrapper: Optional[Path] = typer.Option(
         None,
         "--wrapper",
-        help="Optional path to launchd wrapper script (defaults to <repo>/scripts/macos/run-mail-assistant-daily.sh).",
+        help=(
+            "Optional path to launchd / scheduled wrapper (defaults to "
+            "<repo>/scripts/macos/run-mail-assistant-daily.sh; same script as run-mail-assistant.command)."
+        ),
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON with structured doctor lines."),
     yougile_probe: bool = typer.Option(
@@ -978,6 +981,7 @@ def print_launchd_cmd(
     wr = wrapper.resolve() if wrapper is not None else (rr / "scripts" / "macos" / "run-mail-assistant-daily.sh")
     digest = digest_out.resolve() if digest_out is not None else (rr / "data" / "digest.md")
     out_log, err_log = _default_launchd_log_paths(rr)
+    run_log = rr / "data" / "logs" / "launchd-daily.log"
     spec = LaunchdPlistSpecDTO(
         label=settings.launchd_label,
         wrapper_script=wr,
@@ -988,6 +992,7 @@ def print_launchd_cmd(
         hour=hour,
         minute=minute,
         maildrop_root=settings.maildrop_root.resolve(),
+        run_log_path=run_log,
     )
     typer.echo(render_launchd_plist_xml(spec))
 
@@ -1006,6 +1011,7 @@ def install_launchd_cmd(
     wr = wrapper.resolve() if wrapper is not None else (rr / "scripts" / "macos" / "run-mail-assistant-daily.sh")
     digest = digest_out.resolve() if digest_out is not None else (rr / "data" / "digest.md")
     out_log, err_log = _default_launchd_log_paths(rr)
+    run_log = rr / "data" / "logs" / "launchd-daily.log"
     spec = LaunchdPlistSpecDTO(
         label=settings.launchd_label,
         wrapper_script=wr,
@@ -1016,6 +1022,7 @@ def install_launchd_cmd(
         hour=hour,
         minute=minute,
         maildrop_root=settings.maildrop_root.resolve(),
+        run_log_path=run_log,
     )
     xml = render_launchd_plist_xml(spec)
     output.parent.mkdir(parents=True, exist_ok=True)

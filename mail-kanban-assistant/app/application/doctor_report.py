@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urljoin
-
+from app.application.lm_studio_probe import lm_studio_models_probe_url
 from app.application.ports import HttpProbePort, KanbanPort
 from app.config import AppSettings
 from app.domain.enums import KanbanProvider
@@ -82,8 +81,7 @@ class DoctorEnvironmentUseCase:
         else:
             lines.append(DoctorLineDTO("WARN", "LM_STUDIO_MODEL is empty"))
 
-        base = settings.lm_studio_base_url.rstrip("/") + "/"
-        probe_url = urljoin(base, "models")
+        probe_url = lm_studio_models_probe_url(settings.lm_studio_base_url)
         status = self.http.get_status(probe_url, timeout_seconds=3.0)
         if status is None:
             lines.append(
